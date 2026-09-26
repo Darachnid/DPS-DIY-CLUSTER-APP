@@ -25,6 +25,7 @@ import android.telephony.CellInfoGsm
 import android.telephony.CellInfoLte
 import android.telephony.CellInfoWcdma
 import android.telephony.TelephonyManager
+import android.text.InputType
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextWatcher
@@ -85,6 +86,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private lateinit var wigleName: EditText
     private lateinit var wigleToken: EditText
     private lateinit var wdgWarsKey: EditText
+    private lateinit var controllerName: EditText
+    private lateinit var controllerPassword: EditText
     private lateinit var prefs: android.content.SharedPreferences
 
     private val seenBssids = LinkedHashSet<String>()
@@ -113,13 +116,17 @@ class MainActivity : ComponentActivity(), BleController.Events {
         val mfgrId: String
     )
 
+    private data class SavedCsv(
+        val fileName: String,
+        val data: ByteArray
+    )
+
     private val captureRecords = ArrayList<CaptureRecord>()
     private val trackPoints = ArrayList<GeoPoint>()
     private var trackLine: Polyline? = null
 
     private var scanning = false
-    private lateinit var startButton: Button
-    private lateinit var stopButton: Button
+    private lateinit var captureButton: Button
     private var observations = 0
     private var onlineNodes = 0
     private var lastLocation: Location? = null
@@ -147,10 +154,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
         override fun onProviderDisabled(provider: String) {}
     }
 
-    // ============================================================
-    // PALETTE — HUD / field-instrument theme.
-    // Central place to tune the look without touching any logic below.
-    // ============================================================
     private val cBg by lazy { Color.rgb(5, 7, 10) }
     private val cPanel by lazy { Color.rgb(12, 19, 27) }
     private val cPanelSoft by lazy { Color.rgb(10, 16, 22) }
@@ -173,9 +176,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
-        // Keep the display on while this activity is in the foreground — no
-        // manifest permission needed; Android clears this flag automatically
-        // the moment the app is backgrounded or the user locks the phone.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         window.statusBarColor = Color.rgb(5, 7, 10)
@@ -191,10 +191,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
         ble = BleController(this, this)
         requestPermissionsIfNeeded()
     }
-
-    // ============================================================
-    // DASHBOARD
-    // ============================================================
 
     private fun buildDashboard() {
         root = LinearLayout(this).apply {
@@ -314,7 +310,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
     private fun header(): View {
         val box = panel(cGreenDim).apply {
-            // Keep the header itself exactly the height of the emblem.
             setPadding(dp(12), 0, dp(12), 0)
             layoutParams = LinearLayout.LayoutParams(-1, dp(88)).apply {
                 setMargins(0, dp(4), 0, dp(6))
@@ -457,62 +452,27 @@ class MainActivity : ComponentActivity(), BleController.Events {
             orientation = LinearLayout.HORIZONTAL
         }
 
-        startButton = button("▶  START", cGreen) {
-            if (!scanning) {
-                seenBssids.clear()
-                seenBleMacs.clear()
-                seenCellKeys.clear()
-                recent.clear()
-
-                renderRecentObservations()
-
-                captureRecords.clear()
-                observations = 0
-
-                updateObservationUi()
-
-                clearTravelPath()
-
-                scanning = true
-
-                startButton.isEnabled = true
-                stopButton.isEnabled = true
-
-                captureText.text = "CAPTURE\nCAPTURING"
-                captureText.setTextColor(cGreen)
-
-                ble.send("START_DEF")
-                addLog("APP -> CONTROLLER: START_DEF")
-
-                startCellScanning()
+        captureButton = button("▶  START", cGreen) {
+            if (scanning) {
+                stopCapture()
+            } else {
+                startCapture()
             }
         }
 
         controls.addView(
-            startButton,
-            weightParams()
-        )
-
-        stopButton = button("■  STOP", cRed) {
-            scanning = false
-
-            stopButton.isEnabled = true
-            startButton.isEnabled = true
-
-            captureText.text = "CAPTURE\nIDLE"
-            captureText.setTextColor(cText1)
-
-            ble.send("STOP")
-            addLog("APP -> CONTROLLER: STOP")
-
-            stopCellScanning()
-        }
-
-        stopButton.isEnabled = true
-
-        controls.addView(
-            stopButton,
-            weightParams()
+            captureButton,
+            LinearLayout.LayoutParams(
+                -1,
+                dp(48)
+            ).apply {
+                setMargins(
+                    dp(3),
+                    dp(3),
+                    dp(3),
+                    dp(3)
+                )
+            }
         )
 
         page.addView(controls)
@@ -552,7 +512,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
         }
 
         saveRow.addView(
-            button("↓  SAVE SESSION", cGreen, dashed = true) {
+            button("↓  SAVE SESSION", cGreen, dashed = false) {
                 saveWigleCsvToDownloads()
             },
             LinearLayout.LayoutParams(-1, dp(48)).apply {
@@ -623,6 +583,61 @@ class MainActivity : ComponentActivity(), BleController.Events {
         content.addView(scroll)
 
         startMap()
+    }
+
+    private fun startCapture() {
+        if (scanning) {
+            return
+        }
+
+        seenBssids.clear()
+        seenBleMacs.clear()
+        seenCellKeys.clear()
+        recent.clear()
+
+        renderRecentObservations()
+
+        captureRecords.clear()
+        observations = 0
+
+        updateObservationUi()
+
+        clearTravelPath()
+
+        scanning = true
+
+        captureButton.text = "■  STOP"
+        captureButton.setTextColor(cRed)
+        captureButton.background = pillButtonBg(cRed, false)
+
+
+        captureText.text = "CAPTURE\nCAPTURING"
+        captureText.setTextColor(cGreen)
+
+        ble.send("START_DEF")
+        addLog("APP -> CONTROLLER: START_DEF")
+
+        startCellScanning()
+    }
+
+    private fun stopCapture() {
+        if (!scanning) {
+            return
+        }
+
+        scanning = false
+
+        captureButton.text = "▶  START"
+        captureButton.setTextColor(cGreen)
+        captureButton.background = pillButtonBg(cGreen, false)
+
+        captureText.text = "CAPTURE\nIDLE"
+        captureText.setTextColor(cText1)
+
+        ble.send("STOP")
+        addLog("APP -> CONTROLLER: STOP")
+
+        stopCellScanning()
     }
 
     private fun nodeCard(id: Int, online: Boolean): View {
@@ -761,14 +776,31 @@ class MainActivity : ComponentActivity(), BleController.Events {
             }
         )
 
-        page.addView(
-            panelText(
-                "CONTROLLER",
-                "BLE target: WD-Hub\n" +
-                        "No PIN • bonded Just Works\n" +
-                        "Service: ${BleController.DPS_SERVICE_UUID}"
+        val controllerCard = panel(cGreenDim)
+
+        controllerCard.addView(
+            sectionLabel(
+                "CONTROLLER SETTINGS",
+                cGreen
             )
         )
+
+        controllerName = edit("Controller Name").apply {
+            persist("controller_name")
+        }
+
+        controllerPassword = edit("Controller Password").apply {
+            inputType =
+                InputType.TYPE_CLASS_TEXT or
+                        InputType.TYPE_TEXT_VARIATION_PASSWORD
+
+            persist("controller_password")
+        }
+
+        controllerCard.addView(controllerName)
+        controllerCard.addView(controllerPassword)
+
+        page.addView(controllerCard)
 
         val wigleCard = panel(cGreenDim)
 
@@ -780,10 +812,16 @@ class MainActivity : ComponentActivity(), BleController.Events {
         )
 
         wigleName = edit("WiGLE API Name").apply {
+            inputType =
+                InputType.TYPE_CLASS_TEXT or
+                        InputType.TYPE_TEXT_VARIATION_PASSWORD
             persist("wigle_name")
         }
 
         wigleToken = edit("WiGLE API Token").apply {
+            inputType =
+                InputType.TYPE_CLASS_TEXT or
+                        InputType.TYPE_TEXT_VARIATION_PASSWORD
             persist("wigle_token")
         }
 
@@ -808,6 +846,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
         )
 
         wdgWarsKey = edit("WDGWars.pl API Key").apply {
+            inputType =
+                InputType.TYPE_CLASS_TEXT or
+                        InputType.TYPE_TEXT_VARIATION_PASSWORD
             persist("wdgwars_key")
         }
 
@@ -821,6 +862,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         page.addView(wdgCard)
 
+        /*
         page.addView(
             button(
                 "↓  SAVE TO DOWNLOADS",
@@ -833,6 +875,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 setMargins(dp(3), dp(6), dp(3), dp(3))
             }
         )
+        */
 
         /*
         page.addView(
@@ -859,14 +902,19 @@ class MainActivity : ComponentActivity(), BleController.Events {
             connectionText.text = "BLE OFFLINE"
             connectionText.setTextColor(cRed)
 
-            addLog("BLE: DISCONNECTED")
+            scanning = false
 
-            // Deliberately do NOT touch `scanning`, captureRecords, or the
-            // recent/observation state here. A capture session in progress
-            // should survive a BLE drop and keep accumulating (WiFi/BLE data
-            // resumes once ble.connectBondedOrScan() reconnects; cell polling
-            // never depended on the BLE link in the first place). Only the
-            // STOP button ends a session — see the STOP handler.
+            if (::captureButton.isInitialized) {
+                captureButton.text = "▶  START"
+                captureButton.setTextColor(cGreen)
+            }
+
+            captureText.text = "CAPTURE\nIDLE"
+            captureText.setTextColor(cText1)
+
+            stopCellScanning()
+
+            addLog("BLE: DISCONNECTED")
         }
     }
 
@@ -1800,15 +1848,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
             return
         }
 
-        val csv = buildWigleCsv()
+        val saved = saveWigleCsvToDownloads()
+            ?: return
 
-        val fileName =
-            "DPS-${
-                SimpleDateFormat(
-                    "yyyyMMddHHmmss",
-                    Locale.US
-                ).format(Date())
-            }.csv"
+        val fileName = saved.fileName
+        val data = saved.data
 
         addLog(
             "WiGLE upload started " +
@@ -1840,10 +1884,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                             ),
                         fileFieldName = "file",
                         fileName = fileName,
-                        fileBytes =
-                            csv.toByteArray(
-                                Charsets.UTF_8
-                            ),
+                        fileBytes = data,
                         fileContentType =
                             "text/csv"
                     )
@@ -1918,15 +1959,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
             return
         }
 
-        val csv = buildWigleCsv()
+        val saved = saveWigleCsvToDownloads()
+            ?: return
 
-        val fileName =
-            "DPS-${
-                SimpleDateFormat(
-                    "yyyyMMddHHmmss",
-                    Locale.US
-                ).format(Date())
-            }.csv"
+        val fileName = saved.fileName
+        val data = saved.data
 
         addLog(
             "WDGWars upload started " +
@@ -1947,10 +1984,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                             emptyMap(),
                         fileFieldName = "file",
                         fileName = fileName,
-                        fileBytes =
-                            csv.toByteArray(
-                                Charsets.UTF_8
-                            ),
+                        fileBytes = data,
                         fileContentType =
                             "text/csv"
                     )
@@ -2095,7 +2129,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
         return code to body
     }
 
-    private fun saveWigleCsvToDownloads() {
+    private fun saveWigleCsvToDownloads(): SavedCsv? {
         if (captureRecords.isEmpty()) {
             addLog(
                 "WiGLE export requested with no captured observations"
@@ -2107,7 +2141,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 Toast.LENGTH_SHORT
             ).show()
 
-            return
+            return null
         }
 
         val fileName =
@@ -2227,6 +2261,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 "Saved to Downloads: $fileName",
                 Toast.LENGTH_LONG
             ).show()
+
+            return SavedCsv(
+                fileName = fileName,
+                data = data
+            )
         } catch (e: Exception) {
             addLog(
                 "WiGLE CSV save failed: " +
@@ -2238,6 +2277,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 "Could not save WiGLE CSV",
                 Toast.LENGTH_LONG
             ).show()
+
+            return null
         }
     }
 
