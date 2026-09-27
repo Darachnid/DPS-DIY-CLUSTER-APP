@@ -1,3 +1,7 @@
+//no max node
+
+
+
 package com.deadpacketsociety.fieldcontroller
 
 import android.Manifest
@@ -94,6 +98,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private val seenBleMacs = LinkedHashSet<String>()
     private val seenCellKeys = LinkedHashSet<String>()
     private val excludedMacs = LinkedHashSet<String>()
+    private val lastNodeOnlineState = HashMap<Int, Boolean>()
     private val CELL_TYPES = setOf("GSM", "WCDMA", "LTE", "NR", "CDMA")
     private val recent = ArrayDeque<String>()
     private val logs = ArrayDeque<String>()
@@ -129,6 +134,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private lateinit var captureButton: Button
     private var observations = 0
     private var onlineNodes = 0
+    private var totalNodes = 0
     private var lastLocation: Location? = null
     private var currentPositionMarker: Marker? = null
 
@@ -141,6 +147,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private val cellScanHandler = Handler(Looper.getMainLooper())
     private var cellScanRunnable: Runnable? = null
     private val cellScanIntervalMs = 4000L
+
+    private lateinit var fileLogger: FileLogger
 
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
@@ -186,6 +194,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
         prefs = getSharedPreferences("dps_prefs", Context.MODE_PRIVATE)
+
+        fileLogger = FileLogger(this)
+        fileLogger.write("=== APP START (DPS Field Controller) ===")
 
         buildDashboard()
         ble = BleController(this, this)
@@ -416,7 +427,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
             orientation = LinearLayout.HORIZONTAL
         }
 
-        nodeText = stat("NODES ONLINE", "0 / 4", cGreen)
+        nodeText = stat("NODES ONLINE", "0 / 0", cGreen)
         observationText = stat("OBSERVATIONS", "0", cGreen)
 
         row2.addView(nodeText, gridCellParams())
@@ -462,12 +473,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 startCapture()
             }
         }
-
-        if (scanning) {
-            captureButton.background = pillButtonBg(cRed, false)
-        }
-
-
 
         controls.addView(
             captureButton,
@@ -734,6 +739,17 @@ class MainActivity : ComponentActivity(), BleController.Events {
             }
         )
 
+        page.addView(
+            tv(
+                "Debug log file: ${fileLogger.currentFileName()}",
+                10,
+                cText2
+            ).apply {
+                typeface = Typeface.MONOSPACE
+                setPadding(dp(6), 0, dp(6), dp(4))
+            }
+        )
+
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
@@ -754,6 +770,19 @@ class MainActivity : ComponentActivity(), BleController.Events {
         )
 
         page.addView(buttons)
+
+        val exportButtons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        exportButtons.addView(
+            button("↓  EXPORT DEBUG LOG", cPurple) {
+                exportDebugLogToDownloads()
+            },
+            weightParams()
+        )
+
+        page.addView(exportButtons)
 
         content.addView(page)
     }
@@ -871,29 +900,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         page.addView(wdgCard)
 
-        /*
-        page.addView(
-            button(
-                "↓  SAVE TO DOWNLOADS",
-                cGreen,
-                dashed = true
-            ) {
-                saveWigleCsvToDownloads()
-            },
-            LinearLayout.LayoutParams(-1, dp(48)).apply {
-                setMargins(dp(3), dp(6), dp(3), dp(3))
-            }
-        )
-        */
-
-        /*
-        page.addView(
-            button("CONNECT / RECONNECT", cGreen) {
-                ble.connectBondedOrScan()
-            }
-        )
-        */
-
         content.addView(scroll)
     }
 
@@ -1003,14 +1009,31 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         val arr = json.optJSONArray("nodes") ?: return
 
-        var online = 0
-
+        // Node count is unbounded — we don't assume a fixed fleet size (like the
+        // old "/ 4"). Instead we track every distinct node id we've ever heard
+        // from in lastNodeOnlineState, and derive online/total from that map.
+        // This also means it still works correctly if the controller ever sends
+        // partial/delta node lists instead of a full snapshot every time: a node
+        // not mentioned in this particular message simply keeps its last known
+        // state rather than silently vanishing from the count.
         for (i in 0 until arr.length()) {
             val node = arr.optJSONObject(i) ?: continue
 
-            if (node.optBoolean("online", false)) {
-                online++
+            val nodeOnline = node.optBoolean("online", false)
+            val nodeId = node.optInt("id", i + 1)
+
+            val previousOnline = lastNodeOnlineState[nodeId]
+
+            if (previousOnline != null && previousOnline != nodeOnline) {
+                if (nodeOnline) {
+                    fileLogger.write("NODE $nodeId RECONNECTED")
+                } else {
+                    fileLogger.write("NODE $nodeId DROPPED (was online, now offline)")
+                    addLog("NODE $nodeId DROPPED")
+                }
             }
+
+            lastNodeOnlineState[nodeId] = nodeOnline
 
             collectMacField(
                 node,
@@ -1027,9 +1050,10 @@ class MainActivity : ComponentActivity(), BleController.Events {
             )
         }
 
-        onlineNodes = online
+        onlineNodes = lastNodeOnlineState.values.count { it }
+        totalNodes = lastNodeOnlineState.size
 
-        nodeText.text = "NODES ONLINE\n$online / 4"
+        nodeText.text = "NODES ONLINE\n$onlineNodes / $totalNodes"
     }
 
     private fun processObservation(
@@ -1443,7 +1467,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         page.addView(
             tv(
-                "$onlineNodes / 4 ONLINE",
+                "$onlineNodes / $totalNodes ONLINE",
                 12,
                 if (onlineNodes > 0) {
                     cGreen
@@ -1465,13 +1489,28 @@ class MainActivity : ComponentActivity(), BleController.Events {
             }
         )
 
-        for (i in 1..4) {
+        if (lastNodeOnlineState.isEmpty()) {
             page.addView(
-                nodeDetailCard(
-                    i,
-                    i <= onlineNodes
-                )
+                tv(
+                    "No node status received yet.",
+                    12,
+                    cText1
+                ).apply {
+                    setPadding(dp(8), dp(4), dp(8), dp(4))
+                }
             )
+        } else {
+            // Any number of nodes is supported — this renders one card per
+            // distinct node id the controller has ever reported, sorted by id,
+            // rather than assuming a fixed fleet size.
+            for (nodeId in lastNodeOnlineState.keys.sorted()) {
+                page.addView(
+                    nodeDetailCard(
+                        nodeId,
+                        lastNodeOnlineState[nodeId] == true
+                    )
+                )
+            }
         }
 
         content.addView(scroll)
@@ -1481,12 +1520,19 @@ class MainActivity : ComponentActivity(), BleController.Events {
         id: Int,
         online: Boolean
     ): View {
-        val accent = when (id) {
-            1 -> cGreen
-            2 -> cBlue
-            3 -> color("#FFB454")
-            else -> cPurple
-        }
+        // Cycles through a fixed palette by id rather than hard-coding 4 slots,
+        // so a fleet of 50 nodes still gets varied, distinguishable colors
+        // instead of every id past 3 collapsing to the same fallback color.
+        val nodeAccentPalette = listOf(
+            cGreen,
+            cBlue,
+            color("#FFB454"),
+            cPurple,
+            color("#FF7AB8"),
+            color("#4DD0E1")
+        )
+
+        val accent = nodeAccentPalette[(id - 1).mod(nodeAccentPalette.size)]
 
         val status =
             if (online) "ONLINE"
@@ -2288,6 +2334,90 @@ class MainActivity : ComponentActivity(), BleController.Events {
             ).show()
 
             return null
+        }
+    }
+
+    private fun exportDebugLogToDownloads() {
+        val file = fileLogger.currentFile()
+
+        if (file == null || !file.exists() || file.length() == 0L) {
+            Toast.makeText(
+                this,
+                "No debug log data yet",
+                Toast.LENGTH_SHORT
+            ).show()
+
+            return
+        }
+
+        fileLogger.flush()
+
+        val fileName = file.name
+
+        try {
+            val data = file.readBytes()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values =
+                    android.content.ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                        put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                        put(
+                            MediaStore.Downloads.RELATIVE_PATH,
+                            Environment.DIRECTORY_DOWNLOADS
+                        )
+                        put(MediaStore.Downloads.IS_PENDING, 1)
+                    }
+
+                val uri =
+                    contentResolver.insert(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        values
+                    ) ?: throw java.io.IOException("Unable to create Downloads file")
+
+                try {
+                    contentResolver.openOutputStream(uri)?.use {
+                        it.write(data)
+                    } ?: throw java.io.IOException("Unable to open Downloads file")
+
+                    values.clear()
+                    values.put(MediaStore.Downloads.IS_PENDING, 0)
+                    contentResolver.update(uri, values, null, null)
+                } catch (e: Exception) {
+                    contentResolver.delete(uri, null, null)
+                    throw e
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val downloads =
+                    Environment.getExternalStoragePublicDirectory(
+                        Environment.DIRECTORY_DOWNLOADS
+                    )
+
+                if (!downloads.exists() && !downloads.mkdirs()) {
+                    throw java.io.IOException("Unable to create Downloads directory")
+                }
+
+                FileOutputStream(File(downloads, fileName)).use {
+                    it.write(data)
+                }
+            }
+
+            addLog("DEBUG LOG exported to Downloads: $fileName")
+
+            Toast.makeText(
+                this,
+                "Debug log saved to Downloads: $fileName",
+                Toast.LENGTH_LONG
+            ).show()
+        } catch (e: Exception) {
+            addLog("DEBUG LOG export failed: ${e.message ?: "unknown error"}")
+
+            Toast.makeText(
+                this,
+                "Could not export debug log",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -3194,6 +3324,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         stopCellScanning()
 
+        if (::fileLogger.isInitialized) {
+            fileLogger.write("=== APP STOP ===")
+            fileLogger.close()
+        }
+
         super.onDestroy()
     }
 
@@ -3733,12 +3868,16 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 Date()
             )
 
-        logs.addLast(
-            "[$timestamp] $message"
-        )
+        val line = "[$timestamp] $message"
+
+        logs.addLast(line)
 
         while (logs.size > 200) {
             logs.removeFirst()
+        }
+
+        if (::fileLogger.isInitialized) {
+            fileLogger.write(message)
         }
     }
 
