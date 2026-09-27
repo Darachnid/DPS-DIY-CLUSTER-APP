@@ -452,13 +452,22 @@ class MainActivity : ComponentActivity(), BleController.Events {
             orientation = LinearLayout.HORIZONTAL
         }
 
-        captureButton = button("▶  START", cGreen) {
+        captureButton = button(
+            if (scanning) "■  STOP" else "▶  START",
+            if (scanning) cRed else cGreen
+        ) {
             if (scanning) {
                 stopCapture()
             } else {
                 startCapture()
             }
         }
+
+        if (scanning) {
+            captureButton.background = pillButtonBg(cRed, false)
+        }
+
+
 
         controls.addView(
             captureButton,
