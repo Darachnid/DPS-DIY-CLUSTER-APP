@@ -1,5 +1,3 @@
-//no max node
-
 
 
 package com.deadpacketsociety.fieldcontroller
@@ -9,7 +7,6 @@ import android.annotation.SuppressLint
 import androidx.annotation.RequiresApi
 import android.content.Context
 import android.content.pm.PackageManager
-import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
@@ -37,7 +34,6 @@ import android.text.style.ForegroundColorSpan
 import android.text.style.RelativeSizeSpan
 import android.text.style.StyleSpan
 import android.util.Base64
-import android.widget.Toast
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -48,6 +44,7 @@ import android.widget.LinearLayout
 import android.widget.ImageView
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -67,7 +64,9 @@ import java.util.Locale
 import java.io.File
 import java.io.FileOutputStream
 
+
 class MainActivity : ComponentActivity(), BleController.Events {
+
 
     private lateinit var root: LinearLayout
     private lateinit var content: FrameLayout
@@ -87,9 +86,13 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private lateinit var stealthBleText: TextView
     private lateinit var stealthCellText: TextView
 
+
+
     private lateinit var wigleName: EditText
     private lateinit var wigleToken: EditText
     private lateinit var wdgWarsKey: EditText
+    private lateinit var wardriftUsername: EditText
+    private lateinit var wardriftPassword: EditText
     private lateinit var controllerName: EditText
     private lateinit var controllerPassword: EditText
     private lateinit var prefs: android.content.SharedPreferences
@@ -98,8 +101,63 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private val seenBleMacs = LinkedHashSet<String>()
     private val seenCellKeys = LinkedHashSet<String>()
     private val excludedMacs = LinkedHashSet<String>()
-    private val lastNodeOnlineState = HashMap<Int, Boolean>()
-    private val CELL_TYPES = setOf("GSM", "WCDMA", "LTE", "NR", "CDMA")
+
+    /*
+ * DPS controller reports explicit node slots.
+ *
+ * The slot is authoritative for UI position:
+ *
+ *   slot 1  -> first card
+ *   slot 2  -> second card
+ *   ...
+ *   slot 10 -> tenth card
+ *
+ * The controller-reported node ID is kept separately because the
+ * controller sends IDs such as "DPS-04" as strings.
+ */
+    private data class NodeState(
+        val slot: Int,
+        var nodeId: String,
+        var online: Boolean = false,
+        var lastHeartbeat: String = "",
+        var wifiMac: String = "",
+        var bleMac: String = ""
+    )
+
+    private val displayedNodeStates =
+        Array(10) { slot ->
+            NodeState(
+                slot = slot + 1,
+                nodeId = "DPS-%02d".format(slot + 1)
+            )
+        }
+
+    private val latestNodeStates =
+        Array(10) { slot ->
+            NodeState(
+                slot = slot + 1,
+                nodeId = "DPS-%02d".format(slot + 1)
+            )
+        }
+
+    private val nodeMissStreak = HashMap<Int, Int>()
+
+    /*
+ * Controller sends a status snapshot every 3 seconds.
+ *
+ * The app still receives and processes every status packet, but the
+ * displayed node state is reconciled only after every 10 status packets.
+ */
+    private var nodeStatusUpdateCount = 0
+
+    private var showingNodesPage = false
+
+    private val NODE_SLOT_COUNT = 10
+    private val NODE_OFFLINE_DEBOUNCE = 30
+
+    private val CELL_TYPES =
+        setOf("GSM", "WCDMA", "LTE", "NR", "CDMA")
+
     private val recent = ArrayDeque<String>()
     private val logs = ArrayDeque<String>()
     private val observationMarkers = ArrayDeque<Marker>()
@@ -134,272 +192,465 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private lateinit var captureButton: Button
     private var observations = 0
     private var onlineNodes = 0
-    private var totalNodes = 0
+
+    private val receivedNodeStatuses = mutableSetOf<Int>()
+    private var totalNodes = NODE_SLOT_COUNT
     private var lastLocation: Location? = null
     private var currentPositionMarker: Marker? = null
 
-    private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
-    private val exportDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).apply {
-        timeZone = java.util.TimeZone.getTimeZone("UTC")
-    }
+    private val dateFormat =
+        SimpleDateFormat("HH:mm:ss", Locale.US)
+
+    private val exportDateFormat =
+        SimpleDateFormat(
+            "yyyy-MM-dd HH:mm:ss",
+            Locale.US
+        ).apply {
+            timeZone =
+                java.util.TimeZone.getTimeZone("UTC")
+        }
+
     private lateinit var locationManager: LocationManager
     private lateinit var telephonyManager: TelephonyManager
-    private val cellScanHandler = Handler(Looper.getMainLooper())
+
+    private val cellScanHandler =
+        Handler(Looper.getMainLooper())
+
     private var cellScanRunnable: Runnable? = null
+
     private val cellScanIntervalMs = 4000L
 
     private lateinit var fileLogger: FileLogger
 
-    private val locationListener = object : LocationListener {
-        override fun onLocationChanged(location: Location) {
-            lastLocation = location
-            updateGpsUi(location)
-            updatePositionMarker(location)
-            updateTravelPath(location)
-        }
+    private val locationListener =
+        object : LocationListener {
 
-        override fun onProviderEnabled(provider: String) {}
-        override fun onProviderDisabled(provider: String) {}
-    }
+            override fun onLocationChanged(
+                location: Location
+            ) {
+                lastLocation = location
 
-    private val cBg by lazy { Color.rgb(5, 7, 10) }
-    private val cPanel by lazy { Color.rgb(12, 19, 27) }
-    private val cPanelSoft by lazy { Color.rgb(10, 16, 22) }
-    private val cLine by lazy { Color.rgb(27, 39, 50) }
-    private val cLineSoft by lazy { Color.rgb(19, 28, 36) }
-    private val cGreen by lazy { color("#39FFB0") }
-    private val cGreenDim by lazy { color("#1A6B52") }
-    private val cBlue by lazy { color("#5EA3FF") }
-    private val cBlueDim by lazy { color("#2A4A75") }
-    private val cPurple by lazy { color("#A36BFF") }
-    private val cPurpleDim by lazy { color("#5B3F94") }
-    private val cRed by lazy { color("#FF4D5E") }
-    private val cRedDim by lazy { color("#5A1F27") }
-    private val cText0 by lazy { color("#EAF2F0") }
-    private val cText1 by lazy { color("#8FA3A8") }
-    private val cText2 by lazy { color("#546570") }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        window.statusBarColor = Color.rgb(5, 7, 10)
-        window.navigationBarColor = Color.rgb(5, 7, 10)
-
-        Configuration.getInstance().userAgentValue = packageName
-
-        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-        prefs = getSharedPreferences("dps_prefs", Context.MODE_PRIVATE)
-
-        fileLogger = FileLogger(this)
-        fileLogger.write("=== APP START (DPS Field Controller) ===")
-
-        buildDashboard()
-        ble = BleController(this, this)
-        requestPermissionsIfNeeded()
-    }
-
-    private fun buildDashboard() {
-        root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(cBg)
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-        }
-
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            view.setPadding(
-                dp(10) + bars.left,
-                dp(8) + bars.top,
-                dp(10) + bars.right,
-                dp(8) + bars.bottom
-            )
-            insets
-        }
-        ViewCompat.requestApplyInsets(root)
-
-        windowRoot = FrameLayout(this)
-        windowRoot.setBackgroundColor(cBg)
-        windowRoot.addView(root, FrameLayout.LayoutParams(-1, -1))
-        setContentView(windowRoot)
-
-        mapView = MapView(this).apply {
-            setTileSource(TileSourceFactory.MAPNIK)
-            setMultiTouchControls(true)
-            controller.setZoom(16.0)
-            setBackgroundColor(Color.rgb(6, 12, 16))
-        }
-
-        root.addView(header())
-        root.addView(statusStrip())
-
-        content = FrameLayout(this)
-        root.addView(
-            content,
-            LinearLayout.LayoutParams(-1, 0, 1f)
-        )
-
-        showDashboardPage()
-        buildStealthOverlay()
-    }
-
-    private fun buildStealthOverlay() {
-        stealthOverlay = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                exitStealthMode()
+                updateGpsUi(location)
+                updatePositionMarker(location)
+                updateTravelPath(location)
             }
-            visibility = View.GONE
+
+            override fun onProviderEnabled(
+                provider: String
+            ) {
+            }
+
+            override fun onProviderDisabled(
+                provider: String
+            ) {
+            }
         }
 
-        val counters = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-        }
-
-        val mutedWhite = color("#B8C0C2")
-
-        stealthWifiText = stealthCounterText(mutedWhite)
-        stealthBleText = stealthCounterText(mutedWhite)
-        stealthCellText = stealthCounterText(mutedWhite)
-
-        counters.addView(stealthWifiText)
-        counters.addView(stealthBleText)
-        counters.addView(stealthCellText)
-
-        stealthOverlay.addView(
-            counters,
-            FrameLayout.LayoutParams(-1, -1)
-        )
-
-        windowRoot.addView(
-            stealthOverlay,
-            FrameLayout.LayoutParams(-1, -1)
-        )
+    private val cBg by lazy {
+        Color.rgb(5, 7, 10)
     }
 
-    private fun stealthCounterText(textColor: Int): TextView {
+    private val cPanel by lazy {
+        Color.rgb(12, 19, 27)
+    }
+
+    private val cPanelSoft by lazy {
+        Color.rgb(10, 16, 22)
+    }
+
+    private val cLine by lazy {
+        Color.rgb(27, 39, 50)
+    }
+
+    private val cLineSoft by lazy {
+        Color.rgb(19, 28, 36)
+    }
+
+    private val cGreen by lazy {
+        color("#39FFB0")
+    }
+
+    private val cGreenDim by lazy {
+        color("#1A6B52")
+    }
+
+    private val cBlue by lazy {
+        color("#5EA3FF")
+    }
+
+    private val cBlueDim by lazy {
+        color("#2A4A75")
+    }
+
+    private val cPurple by lazy {
+        color("#A36BFF")
+    }
+
+    private val cPurpleDim by lazy {
+        color("#5B3F94")
+    }
+
+    private val cRed by lazy {
+        color("#FF4D5E")
+    }
+
+    private val cRedDim by lazy {
+        color("#5A1F27")
+    }
+
+    private val cText0 by lazy {
+        color("#EAF2F0")
+    }
+
+    private val cText1 by lazy {
+        color("#8FA3A8")
+    }
+
+    private val cText2 by lazy {
+        color("#546570")
+    }
+    private data class NodeCardViews(
+        val card: LinearLayout,
+        val statusDot: TextView,
+        val slotText: TextView,
+        val nodeIdText: TextView,
+        val statusText: TextView,
+        val connectionText: TextView,
+        val heartbeatText: TextView
+    )
+
+    private val nodeCardViews =
+        arrayOfNulls<NodeCardViews>(
+            NODE_SLOT_COUNT
+        )
+    private fun signInToWardrift() {
+        val username =
+            wardriftUsername.text
+                ?.toString()
+                ?.trim()
+                .orEmpty()
+
+        val password =
+            wardriftPassword.text
+                ?.toString()
+                ?.trim()
+                .orEmpty()
+
+        if (username.isEmpty() || password.isEmpty()) {
+            Toast.makeText(
+                this,
+                "Enter your Wardrift username and password first",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        Thread {
+            try {
+                val token =
+                    signInAndGetWardriftToken(
+                        username,
+                        password
+                    )
+
+                prefs.edit()
+                    .putString(
+                        "wardrift_session_token",
+                        token
+                    )
+                    .apply()
+
+                runOnUiThread {
+                    addLog("Wardrift sign-in successful; session token saved")
+                    Toast.makeText(
+                        this,
+                        "Signed in to Wardrift",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (e: Exception) {
+                prefs.edit()
+                    .remove("wardrift_session_token")
+                    .apply()
+
+                runOnUiThread {
+                    addLog(
+                        "Wardrift sign-in failed: ${e.message ?: "unknown error"}"
+                    )
+                    Toast.makeText(
+                        this,
+                        "Wardrift sign-in failed — see Monitor log",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }.start()
+    }
+
+
+    private fun stealthCounterText(
+        textColor: Int
+    ): TextView {
         return TextView(this).apply {
             textSize = 24f
+
             setTextColor(textColor)
-            typeface = Typeface.MONOSPACE
-            gravity = Gravity.CENTER
+
+            typeface =
+                Typeface.MONOSPACE
+
+            gravity =
+                Gravity.CENTER
+
             includeFontPadding = false
-            setPadding(0, dp(6), 0, dp(6))
+
+            setPadding(
+                0,
+                dp(6),
+                0,
+                dp(6)
+            )
         }
     }
 
     private fun updateStealthCounters() {
-        if (!::stealthWifiText.isInitialized) return
+        if (!::stealthWifiText.isInitialized) {
+            return
+        }
 
-        stealthWifiText.text = "W: ${seenBssids.size}"
-        stealthBleText.text = "B: ${seenBleMacs.size}"
-        stealthCellText.text = "C: ${seenCellKeys.size}"
+        stealthWifiText.text =
+            "W: ${seenBssids.size}"
+
+        stealthBleText.text =
+            "B: ${seenBleMacs.size}"
+
+        stealthCellText.text =
+            "C: ${seenCellKeys.size}"
     }
 
     private fun enterStealthMode() {
         updateStealthCounters()
 
-        stealthOverlay.visibility = View.VISIBLE
+        stealthOverlay.visibility =
+            View.VISIBLE
 
-        window.statusBarColor = Color.BLACK
-        window.navigationBarColor = Color.BLACK
+        window.statusBarColor =
+            Color.BLACK
+
+        window.navigationBarColor =
+            Color.BLACK
     }
 
     private fun exitStealthMode() {
-        stealthOverlay.visibility = View.GONE
+        stealthOverlay.visibility =
+            View.GONE
 
-        window.statusBarColor = cBg
-        window.navigationBarColor = cBg
+        window.statusBarColor =
+            cBg
+
+        window.navigationBarColor =
+            cBg
     }
 
     private fun header(): View {
-        val box = panel(cGreenDim).apply {
-            setPadding(dp(12), 0, dp(12), 0)
-            layoutParams = LinearLayout.LayoutParams(-1, dp(88)).apply {
-                setMargins(0, dp(4), 0, dp(6))
+        val box =
+            panel(cGreenDim).apply {
+                setPadding(
+                    dp(12),
+                    0,
+                    dp(12),
+                    0
+                )
+
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        -1,
+                        dp(88)
+                    ).apply {
+                        setMargins(
+                            0,
+                            dp(4),
+                            0,
+                            dp(6)
+                        )
+                    }
             }
-        }
 
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(-1, dp(80))
-        }
+        val row =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
 
-        val emblemFrame = FrameLayout(this).apply {
-            background = ovalBg(cGreen, Color.rgb(9, 6, 16))
-        }
+                gravity =
+                    Gravity.CENTER_VERTICAL
 
-        val emblem = ImageView(this).apply {
-            setImageResource(R.drawable.dps_emblem)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            contentDescription = "Dead Packet Society"
-        }
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        -1,
+                        dp(80)
+                    )
+            }
+
+        val emblemFrame =
+            FrameLayout(this).apply {
+                background =
+                    ovalBg(
+                        cGreen,
+                        Color.rgb(9, 6, 16)
+                    )
+            }
+
+        val emblem =
+            ImageView(this).apply {
+                setImageResource(
+                    R.drawable.dps_emblem
+                )
+
+                scaleType =
+                    ImageView.ScaleType.FIT_CENTER
+
+                contentDescription =
+                    "Dead Packet Society"
+            }
 
         emblemFrame.addView(
             emblem,
-            FrameLayout.LayoutParams(dp(60), dp(60)).apply {
-                gravity = Gravity.CENTER
+            FrameLayout.LayoutParams(
+                dp(60),
+                dp(60)
+            ).apply {
+                gravity =
+                    Gravity.CENTER
             }
         )
 
-        val titles = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply {
-                setMargins(dp(12), 0, dp(6), 0)
-            }
-        }
+        val titles =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
 
-        val title = tv("DEAD PACKET SOCIETY", 16, cText0).apply {
-            typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
-            letterSpacing = 0.05f
-            setPadding(0, 0, 0, dp(1))
-        }
+                gravity =
+                    Gravity.CENTER_VERTICAL
+
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        0,
+                        -1,
+                        1f
+                    ).apply {
+                        setMargins(
+                            dp(12),
+                            0,
+                            dp(6),
+                            0
+                        )
+                    }
+            }
+
+        val title =
+            tv(
+                "DEAD PACKET SOCIETY",
+                16,
+                cText0
+            ).apply {
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
+
+                letterSpacing = 0.05f
+
+                setPadding(
+                    0,
+                    0,
+                    0,
+                    dp(1)
+                )
+            }
 
         titles.addView(title)
 
-        val subtitle = tv("NIGHTSHADE'S DPS FIELD CONTROLLER", 10, cGreen).apply {
-            typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
-            letterSpacing = 0.12f
-            setPadding(0, 0, 0, dp(3))
-        }
+        val subtitle =
+            tv(
+                "NIGHTSHADE'S DPS FIELD CONTROLLER",
+                10,
+                cGreen
+            ).apply {
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
+
+                letterSpacing = 0.12f
+
+                setPadding(
+                    0,
+                    0,
+                    0,
+                    dp(3)
+                )
+            }
 
         titles.addView(subtitle)
 
-        connectionText = tv("SYSTEM OFFLINE", 12, cRed).apply {
-            typeface = Typeface.MONOSPACE
-            letterSpacing = 0.03f
-            setPadding(0, 0, 0, 0)
-        }
+        connectionText =
+            tv(
+                "SYSTEM OFFLINE",
+                12,
+                cRed
+            ).apply {
+                typeface =
+                    Typeface.MONOSPACE
+
+                letterSpacing = 0.03f
+
+                setPadding(
+                    0,
+                    0,
+                    0,
+                    0
+                )
+            }
 
         titles.addView(connectionText)
 
-        val disconnect = button("DISCONNECT", cRed) {
-            ble.disconnect()
-        }.apply {
-            textSize = 11f
-        }
+        val disconnect =
+            button(
+                "DISCONNECT",
+                cRed
+            ) {
+                ble.disconnect()
+            }.apply {
+                textSize = 11f
+            }
 
         row.addView(
             emblemFrame,
-            LinearLayout.LayoutParams(dp(72), dp(72))
+            LinearLayout.LayoutParams(
+                dp(72),
+                dp(72)
+            )
         )
 
         row.addView(titles)
 
         row.addView(
             disconnect,
-            LinearLayout.LayoutParams(dp(118), dp(44)).apply {
-                setMargins(0, 0, dp(8), 0)
-                disconnect.visibility = View.GONE
+            LinearLayout.LayoutParams(
+                dp(118),
+                dp(44)
+            ).apply {
+                setMargins(
+                    0,
+                    0,
+                    dp(8),
+                    0
+                )
+
+                disconnect.visibility =
+                    View.GONE
             }
         )
 
@@ -409,39 +660,95 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun statusStrip(): View {
-        val grid = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
+        val grid =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
+            }
 
-        val row1 = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
+        val row1 =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
+            }
 
-        captureText = stat("CAPTURE", "IDLE", cText2)
-        gpsText = stat("GPS FIX", "WAITING", cGreen)
+        captureText =
+            stat(
+                "CAPTURE",
+                "IDLE",
+                cText2
+            )
 
-        row1.addView(captureText, gridCellParams())
-        row1.addView(gpsText, gridCellParams())
+        gpsText =
+            stat(
+                "GPS FIX",
+                "WAITING",
+                cGreen
+            )
 
-        val row2 = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
+        row1.addView(
+            captureText,
+            gridCellParams()
+        )
 
-        nodeText = stat("NODES ONLINE", "0 / 0", cGreen)
-        observationText = stat("OBSERVATIONS", "0", cGreen)
+        row1.addView(
+            gpsText,
+            gridCellParams()
+        )
 
-        row2.addView(nodeText, gridCellParams())
-        row2.addView(observationText, gridCellParams())
+        val row2 =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
+            }
+
+        /*
+     * There are always 10 physical/controller slots.
+     */
+        nodeText =
+            stat(
+                "NODES ONLINE",
+                "0 / 10",
+                cGreen
+            )
+
+        observationText =
+            stat(
+                "OBSERVATIONS",
+                "0",
+                cGreen
+            )
+
+        row2.addView(
+            nodeText,
+            gridCellParams()
+        )
+
+        row2.addView(
+            observationText,
+            gridCellParams()
+        )
 
         grid.addView(
             row1,
-            LinearLayout.LayoutParams(-1, -2)
+            LinearLayout.LayoutParams(
+                -1,
+                -2
+            )
         )
 
         grid.addView(
             row2,
-            LinearLayout.LayoutParams(-1, -2).apply {
-                setMargins(0, dp(6), 0, 0)
+            LinearLayout.LayoutParams(
+                -1,
+                -2
+            ).apply {
+                setMargins(
+                    0,
+                    dp(6),
+                    0,
+                    0
+                )
             }
         )
 
@@ -449,29 +756,55 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun showDashboardPage() {
+        showingNodesPage = false
+
         content.removeAllViews()
 
-        val scroll = ScrollView(this)
+        val scroll =
+            ScrollView(this)
 
-        val page = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
+        val page =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
+            }
 
         scroll.addView(page)
 
-        val controls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-
-        captureButton = button(
-            if (scanning) "■  STOP" else "▶  START",
-            if (scanning) cRed else cGreen
-        ) {
-            if (scanning) {
-                stopCapture()
-            } else {
-                startCapture()
+        val controls =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
             }
+
+        captureButton =
+            button(
+                if (scanning) {
+                    "■  STOP"
+                } else {
+                    "▶  START"
+                },
+                if (scanning) {
+                    cRed
+                } else {
+                    cGreen
+                }
+            ) {
+                if (scanning) {
+                    stopCapture()
+                    scanning = false
+                } else {
+                    startCapture()
+                    scanning = true
+                }
+            }
+
+        if (scanning) {
+            captureButton.background =
+                pillButtonBg(
+                    cRed,
+                    false
+                )
         }
 
         controls.addView(
@@ -491,19 +824,50 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         page.addView(controls)
 
-        val secondControls = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
+        val secondControls =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
+            }
 
         secondControls.addView(
-            button("MONITOR", cGreen) {
+            button(
+                "MONITOR",
+                cGreen
+            ) {
                 showCommunicationPage()
             },
             weightParams()
         )
 
+        /*
+   * Dedicated dashboard NODES button.
+   */
         secondControls.addView(
-            button("⚙ Settings", cGreen) {
+            button(
+                "NODES",
+                cGreen
+            ) {
+                showNodesPage()
+            },
+            weightParams()
+        )
+
+        secondControls.addView(
+            button(
+                "UPLOADS",
+                cGreen
+            ) {
+                showUploadsPage()
+            },
+            weightParams()
+        )
+
+        secondControls.addView(
+            button(
+                "⚙ Settings",
+                cGreen
+            ) {
                 showConfigPage()
             },
             weightParams()
@@ -511,84 +875,191 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         page.addView(secondControls)
 
+
+
         page.addView(
-            button("STEALTH MODE", cText1) {
+            button(
+                "STEALTH MODE",
+                cText1
+            ) {
                 enterStealthMode()
             },
-            LinearLayout.LayoutParams(-1, dp(48)).apply {
-                setMargins(dp(3), dp(3), dp(3), dp(3))
+            LinearLayout.LayoutParams(
+                -1,
+                dp(48)
+            ).apply {
+                setMargins(
+                    dp(3),
+                    dp(3),
+                    dp(3),
+                    dp(3)
+                )
             }
         )
 
-        val saveRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
+        val saveRow =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER
+            }
 
         saveRow.addView(
-            button("↓  SAVE SESSION", cGreen, dashed = false) {
+            button(
+                "UPLOAD ALL",
+                cPurple,
+                dashed = false
+            ) {
+                //l0l
+                uploadToWigle()
+                uploadToWdgWars()
+                uploadToWardrift()
+            },
+            LinearLayout.LayoutParams(
+                0,
+                dp(48)
+            ).apply {
+                weight = 1f
+                setMargins(
+                    dp(3),
+                    dp(6),
+                    dp(3),
+                    dp(3)
+                )
+            }
+        )
+
+        saveRow.addView(
+            button(
+                "↓  SAVE SESSION",
+                cBlue,
+                dashed = false
+            ) {
                 saveWigleCsvToDownloads()
             },
-            LinearLayout.LayoutParams(-1, dp(48)).apply {
-                setMargins(dp(3), dp(6), dp(3), dp(3))
+            LinearLayout.LayoutParams(
+                0,
+                dp(48)
+            ).apply {
+                weight = 1f
+                setMargins(
+                    dp(3),
+                    dp(6),
+                    dp(3),
+                    dp(3)
+                )
             }
         )
 
         page.addView(saveRow)
 
-        val recentHeaderRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(14), dp(8), dp(6))
-        }
+        val recentHeaderRow =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER_VERTICAL
+
+                setPadding(
+                    dp(8),
+                    dp(14),
+                    dp(8),
+                    dp(6)
+                )
+            }
 
         recentHeaderRow.addView(
-            tv("RECENT OBSERVATIONS", 13, cText0).apply {
-                typeface = Typeface.create(
-                    "sans-serif-condensed",
-                    Typeface.BOLD
-                )
+            tv(
+                "RECENT OBSERVATIONS",
+                13,
+                cText0
+            ).apply {
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
+
                 letterSpacing = 0.06f
-                setPadding(0, 0, 0, 0)
+
+                setPadding(
+                    0,
+                    0,
+                    0,
+                    0
+                )
             },
-            LinearLayout.LayoutParams(0, -2, 1f)
+            LinearLayout.LayoutParams(
+                0,
+                -2,
+                1f
+            )
         )
 
         recentHeaderRow.addView(
-            tv("LIVE FEED", 10, cText2).apply {
-                typeface = Typeface.MONOSPACE
+            tv(
+                "LIVE FEED",
+                10,
+                cText2
+            ).apply {
+                typeface =
+                    Typeface.MONOSPACE
+
                 letterSpacing = 0.05f
             }
         )
 
         page.addView(recentHeaderRow)
 
-        recentContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = cardBg(
-                cLine,
-                cPanel,
-                dp(4).toFloat(),
-                dp(1)
-            )
-        }
+        recentContainer =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
 
-        recentText = tv("No observations yet.", 11, cText1).apply {
-            includeFontPadding = false
-            setPadding(
-                dp(12),
-                dp(12),
-                dp(12),
-                dp(12)
-            )
-        }
+                background =
+                    cardBg(
+                        cLine,
+                        cPanel,
+                        dp(4).toFloat(),
+                        dp(1)
+                    )
+            }
 
-        recentContainer.addView(recentText)
+        recentText =
+            tv(
+                "No observations yet.",
+                11,
+                cText1
+            ).apply {
+                includeFontPadding = false
+
+                setPadding(
+                    dp(12),
+                    dp(12),
+                    dp(12),
+                    dp(12)
+                )
+            }
+
+        recentContainer.addView(
+            recentText
+        )
 
         page.addView(
             recentContainer,
-            LinearLayout.LayoutParams(-1, -2).apply {
-                setMargins(dp(3), 0, dp(3), dp(6))
+            LinearLayout.LayoutParams(
+                -1,
+                -2
+            ).apply {
+                setMargins(
+                    dp(3),
+                    0,
+                    dp(3),
+                    dp(6)
+                )
             }
         )
 
@@ -620,16 +1091,31 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         scanning = true
 
-        captureButton.text = "■  STOP"
-        captureButton.setTextColor(cRed)
-        captureButton.background = pillButtonBg(cRed, false)
+        captureButton.text =
+            "■  STOP"
 
+        captureButton.setTextColor(
+            cRed
+        )
 
-        captureText.text = "CAPTURE\nCAPTURING"
-        captureText.setTextColor(cGreen)
+        captureButton.background =
+            pillButtonBg(
+                cRed,
+                false
+            )
+
+        captureText.text =
+            "CAPTURE\nCAPTURING"
+
+        captureText.setTextColor(
+            cGreen
+        )
 
         ble.send("START_DEF")
-        addLog("APP -> CONTROLLER: START_DEF")
+
+        addLog(
+            "APP -> CONTROLLER: START_DEF"
+        )
 
         startCellScanning()
     }
@@ -641,28 +1127,60 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         scanning = false
 
-        captureButton.text = "▶  START"
-        captureButton.setTextColor(cGreen)
-        captureButton.background = pillButtonBg(cGreen, false)
+        captureButton.text =
+            "▶  START"
 
-        captureText.text = "CAPTURE\nIDLE"
-        captureText.setTextColor(cText1)
+        captureButton.setTextColor(
+            cGreen
+        )
+
+        captureButton.background =
+            pillButtonBg(
+                cGreen,
+                false
+            )
+
+        captureText.text =
+            "CAPTURE\nIDLE"
+
+        captureText.setTextColor(
+            cText1
+        )
 
         ble.send("STOP")
-        addLog("APP -> CONTROLLER: STOP")
+
+        addLog(
+            "APP -> CONTROLLER: STOP"
+        )
 
         stopCellScanning()
     }
 
-    private fun nodeCard(id: Int, online: Boolean): View {
-        val box = panel(cLine)
+    private fun nodeCard(
+        id: Int,
+        online: Boolean
+    ): View {
+        val box =
+            panel(cLine)
 
-        val status = if (online) "ONLINE" else "OFFLINE"
-        val statusColor = if (online) cGreen else cRed
+        val status =
+            if (online) {
+                "ONLINE"
+            } else {
+                "OFFLINE"
+            }
+
+        val statusColor =
+            if (online) {
+                cGreen
+            } else {
+                cRed
+            }
 
         box.addView(
             tv(
-                "DPS-%02d   •   %s".format(id, status),
+                "DPS-%02d   •   %s"
+                    .format(id, status),
                 14,
                 statusColor
             )
@@ -680,39 +1198,56 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun showCommunicationPage() {
+        showingNodesPage = false
+
         content.removeAllViews()
 
-        val page = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
+        val page =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
+            }
 
         page.addView(
-            button("‹  BACK TO DASHBOARD", cGreen) {
+            button(
+                "‹  BACK TO DASHBOARD",
+                cGreen
+            ) {
                 showDashboardPage()
             }
         )
 
         page.addView(
-            tv("COMMUNICATION MONITOR", 18, cText0).apply {
-                typeface = Typeface.create(
-                    "sans-serif-condensed",
-                    Typeface.BOLD
-                )
+            tv(
+                "COMMUNICATION MONITOR",
+                18,
+                cText0
+            ).apply {
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
+
                 letterSpacing = 0.04f
             }
         )
 
-        val logScroll = ScrollView(this)
+        val logScroll =
+            ScrollView(this)
 
-        val logText = tv(
-            logs.joinToString("\n").ifBlank {
-                "Waiting for BLE traffic…"
-            },
-            12,
-            cText1
-        ).apply {
-            typeface = Typeface.MONOSPACE
-        }
+        val logText =
+            tv(
+                logs.joinToString("\n")
+                    .ifBlank {
+                        "Waiting for BLE traffic…"
+                    },
+                12,
+                cText1
+            ).apply {
+                typeface =
+                    Typeface.MONOSPACE
+            }
 
         logText.setPadding(
             dp(12),
@@ -725,17 +1260,27 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         logScroll.addView(logText)
 
-        logScroll.background = cardBg(
-            cLine,
-            cPanel,
-            dp(4).toFloat(),
-            dp(1)
-        )
+        logScroll.background =
+            cardBg(
+                cLine,
+                cPanel,
+                dp(4).toFloat(),
+                dp(1)
+            )
 
         page.addView(
             logScroll,
-            LinearLayout.LayoutParams(-1, 0, 1f).apply {
-                setMargins(dp(3), dp(6), dp(3), dp(6))
+            LinearLayout.LayoutParams(
+                -1,
+                0,
+                1f
+            ).apply {
+                setMargins(
+                    dp(3),
+                    dp(6),
+                    dp(3),
+                    dp(6)
+                )
             }
         )
 
@@ -745,24 +1290,39 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 10,
                 cText2
             ).apply {
-                typeface = Typeface.MONOSPACE
-                setPadding(dp(6), 0, dp(6), dp(4))
+                typeface =
+                    Typeface.MONOSPACE
+
+                setPadding(
+                    dp(6),
+                    0,
+                    dp(6),
+                    dp(4)
+                )
             }
         )
 
-        val buttons = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
+        val buttons =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
+            }
 
         buttons.addView(
-            button("COPY ALL", cGreen) {
+            button(
+                "COPY ALL",
+                cGreen
+            ) {
                 copyLogs()
             },
             weightParams()
         )
 
         buttons.addView(
-            button("CLEAR", cRed) {
+            button(
+                "CLEAR",
+                cRed
+            ) {
                 logs.clear()
                 logText.text = ""
             },
@@ -771,12 +1331,17 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         page.addView(buttons)
 
-        val exportButtons = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
+        val exportButtons =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
+            }
 
         exportButtons.addView(
-            button("↓  EXPORT DEBUG LOG", cPurple) {
+            button(
+                "↓  EXPORT DEBUG LOG",
+                cPurple
+            ) {
                 exportDebugLogToDownloads()
             },
             weightParams()
@@ -788,33 +1353,48 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun showConfigPage() {
+        showingNodesPage = false
+
         content.removeAllViews()
 
-        val scroll = ScrollView(this)
+        val scroll =
+            ScrollView(this)
 
-        val page = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
+        val page =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
+            }
 
         scroll.addView(page)
 
         page.addView(
-            button("‹  BACK TO DASHBOARD", cGreen) {
+            button(
+                "‹  BACK TO DASHBOARD",
+                cGreen
+            ) {
                 showDashboardPage()
             }
         )
 
         page.addView(
-            tv("CONFIGURATION", 18, cText0).apply {
-                typeface = Typeface.create(
-                    "sans-serif-condensed",
-                    Typeface.BOLD
-                )
+            tv(
+                "CONFIGURATION",
+                18,
+                cText0
+            ).apply {
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
+
                 letterSpacing = 0.04f
             }
         )
 
-        val controllerCard = panel(cGreenDim)
+        val controllerCard =
+            panel(cGreenDim)
 
         controllerCard.addView(
             sectionLabel(
@@ -823,24 +1403,105 @@ class MainActivity : ComponentActivity(), BleController.Events {
             )
         )
 
-        controllerName = edit("Controller Name").apply {
-            persist("controller_name")
-        }
+        controllerName =
+            edit("Controller Name").apply {
+                persist("controller_name")
+            }
 
-        controllerPassword = edit("Controller Password").apply {
-            inputType =
-                InputType.TYPE_CLASS_TEXT or
-                        InputType.TYPE_TEXT_VARIATION_PASSWORD
+        controllerPassword =
+            edit("Controller Password").apply {
+                inputType =
+                    InputType.TYPE_CLASS_TEXT or
+                            InputType.TYPE_TEXT_VARIATION_PASSWORD
 
-            persist("controller_password")
-        }
+                persist("controller_password")
+            }
 
-        controllerCard.addView(controllerName)
-        controllerCard.addView(controllerPassword)
+        controllerCard.addView(
+            controllerName
+        )
+
+        controllerCard.addView(
+            controllerPassword
+        )
 
         page.addView(controllerCard)
 
-        val wigleCard = panel(cGreenDim)
+        val connectionCard =
+            panel(cBlueDim)
+
+        connectionCard.addView(
+            sectionLabel(
+                "CONTROLLER CONNECTION",
+                cBlue
+            )
+        )
+
+        connectionCard.addView(
+            button(
+                "CONNECT / RECONNECT",
+                cBlue
+            ) {
+                ble.connectBondedOrScan()
+            }
+        )
+
+        connectionCard.addView(
+            tv(
+                "BLE TARGET: WD-Hub",
+                10,
+                cText1
+            )
+        )
+
+        page.addView(connectionCard)
+
+        content.addView(scroll)
+    }
+
+    private fun showUploadsPage() {
+        showingNodesPage = false
+
+        content.removeAllViews()
+
+        val scroll =
+            ScrollView(this)
+
+        val page =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
+            }
+
+        scroll.addView(page)
+
+        page.addView(
+            button(
+                "‹  BACK TO DASHBOARD",
+                cGreen
+            ) {
+                showDashboardPage()
+            }
+        )
+
+        page.addView(
+            tv(
+                "UPLOADS",
+                18,
+                cText0
+            ).apply {
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
+
+                letterSpacing = 0.04f
+            }
+        )
+
+        val wigleCard =
+            panel(cGreenDim)
 
         wigleCard.addView(
             sectionLabel(
@@ -849,32 +1510,40 @@ class MainActivity : ComponentActivity(), BleController.Events {
             )
         )
 
-        wigleName = edit("WiGLE API Name").apply {
-            inputType =
-                InputType.TYPE_CLASS_TEXT or
-                        InputType.TYPE_TEXT_VARIATION_PASSWORD
-            persist("wigle_name")
-        }
+        wigleName =
+            edit("WiGLE API Name").apply {
+                inputType =
+                    InputType.TYPE_CLASS_TEXT or
+                            InputType.TYPE_TEXT_VARIATION_PASSWORD
 
-        wigleToken = edit("WiGLE API Token").apply {
-            inputType =
-                InputType.TYPE_CLASS_TEXT or
-                        InputType.TYPE_TEXT_VARIATION_PASSWORD
-            persist("wigle_token")
-        }
+                persist("wigle_name")
+            }
+
+        wigleToken =
+            edit("WiGLE API Token").apply {
+                inputType =
+                    InputType.TYPE_CLASS_TEXT or
+                            InputType.TYPE_TEXT_VARIATION_PASSWORD
+
+                persist("wigle_token")
+            }
 
         wigleCard.addView(wigleName)
         wigleCard.addView(wigleToken)
 
         wigleCard.addView(
-            button("UPLOAD TO WiGLE", cGreen) {
+            button(
+                "UPLOAD TO WiGLE",
+                cGreen
+            ) {
                 uploadToWigle()
             }
         )
 
         page.addView(wigleCard)
 
-        val wdgCard = panel(cPurpleDim)
+        val wdgCard =
+            panel(cPurpleDim)
 
         wdgCard.addView(
             sectionLabel(
@@ -883,73 +1552,227 @@ class MainActivity : ComponentActivity(), BleController.Events {
             )
         )
 
-        wdgWarsKey = edit("WDGWars.pl API Key").apply {
-            inputType =
-                InputType.TYPE_CLASS_TEXT or
-                        InputType.TYPE_TEXT_VARIATION_PASSWORD
-            persist("wdgwars_key")
-        }
+        wdgWarsKey =
+            edit("WDGWars.pl API Key").apply {
+                inputType =
+                    InputType.TYPE_CLASS_TEXT or
+                            InputType.TYPE_TEXT_VARIATION_PASSWORD
+
+                persist("wdgwars_key")
+            }
 
         wdgCard.addView(wdgWarsKey)
 
         wdgCard.addView(
-            button("UPLOAD TO WDGWARS", cPurple) {
+            button(
+                "UPLOAD TO WDGWARS",
+                cPurple
+            ) {
                 uploadToWdgWars()
             }
         )
 
         page.addView(wdgCard)
 
+        val wardriftCard =
+            panel(cBlueDim)
+
+        wardriftCard.addView(
+            sectionLabel(
+                "WARDRIFT UPLOAD",
+                cBlue
+            )
+        )
+
+        wardriftUsername =
+            edit("Wardrift Username").apply {
+                inputType =
+                    InputType.TYPE_CLASS_TEXT
+
+                persist("wardrift_username")
+
+                addTextChangedListener(
+                    object : TextWatcher {
+                        override fun beforeTextChanged(
+                            s: CharSequence?,
+                            start: Int,
+                            count: Int,
+                            after: Int
+                        ) {
+                        }
+
+                        override fun onTextChanged(
+                            s: CharSequence?,
+                            start: Int,
+                            before: Int,
+                            count: Int
+                        ) {
+                            prefs.edit()
+                                .remove("wardrift_session_token")
+                                .apply()
+                        }
+
+                        override fun afterTextChanged(
+                            s: android.text.Editable?
+                        ) {
+                        }
+                    }
+                )
+            }
+
+        wardriftPassword =
+            edit("Wardrift Password").apply {
+                inputType =
+                    InputType.TYPE_CLASS_TEXT or
+                            InputType.TYPE_TEXT_VARIATION_PASSWORD
+
+                persist("wardrift_password")
+
+                addTextChangedListener(
+                    object : TextWatcher {
+                        override fun beforeTextChanged(
+                            s: CharSequence?,
+                            start: Int,
+                            count: Int,
+                            after: Int
+                        ) {
+                        }
+
+                        override fun onTextChanged(
+                            s: CharSequence?,
+                            start: Int,
+                            before: Int,
+                            count: Int
+                        ) {
+                            prefs.edit()
+                                .remove("wardrift_session_token")
+                                .apply()
+                        }
+
+                        override fun afterTextChanged(
+                            s: android.text.Editable?
+                        ) {
+                        }
+                    }
+                )
+            }
+
+        wardriftCard.addView(wardriftUsername)
+        wardriftCard.addView(wardriftPassword)
+
+        /*wardriftCard.addView(
+            button(
+                "SIGN IN TO WARDRIFT",
+                cBlue
+            ) {
+                signInToWardrift()
+            }
+        )
+        */
+        wardriftCard.addView(
+            button(
+                "UPLOAD TO WARDRIFT",
+                cBlue
+            ) {
+                uploadToWardrift()
+            }
+        )
+
+        page.addView(wardriftCard)
+
+
+
         content.addView(scroll)
     }
 
-    override fun connected(name: String) {
+    override fun connected(
+        name: String
+    ) {
         runOnUiThread {
-            connectionText.text = "SYSTEM CONNECTED • $name"
-            connectionText.setTextColor(cGreen)
+            connectionText.text =
+                "SYSTEM CONNECTED • $name"
 
-            addLog("BLE: CONNECTED TO $name")
+            connectionText.setTextColor(
+                cGreen
+            )
+
+            addLog(
+                "BLE: CONNECTED TO $name"
+            )
         }
     }
 
     override fun disconnected() {
         runOnUiThread {
-            connectionText.text = "BLE OFFLINE"
-            connectionText.setTextColor(cRed)
+            connectionText.text =
+                "BLE OFFLINE"
+
+            connectionText.setTextColor(
+                cRed
+            )
 
             scanning = false
 
             if (::captureButton.isInitialized) {
-                captureButton.text = "▶  START"
-                captureButton.setTextColor(cGreen)
+                captureButton.text =
+                    "▶  START"
+
+                captureButton.setTextColor(
+                    cGreen
+                )
             }
 
-            captureText.text = "CAPTURE\nIDLE"
-            captureText.setTextColor(cText1)
+            captureText.text =
+                "CAPTURE\nIDLE"
 
+            captureText.setTextColor(
+                cText1
+            )
+            if (scanning) {
+                saveWigleCsvToDownloads()///save here
+            }
             stopCellScanning()
 
-            addLog("BLE: DISCONNECTED")
+
+            /*
+         * Start the next controller connection with a fresh
+         * ten-status reconciliation cycle.
+         */
+            nodeStatusUpdateCount = 0
+
+            addLog(
+                "BLE: DISCONNECTED"
+            )
         }
     }
 
-    override fun status(text: String) {
+    override fun status(
+        text: String
+    ) {
         runOnUiThread {
             parseCONTROLLER(text)
         }
     }
 
-    override fun log(text: String) {
+    override fun log(
+        text: String
+    ) {
         runOnUiThread {
             addLog(text)
         }
     }
 
-    private fun normalizeMac(value: String): String =
-        value.trim().uppercase(Locale.US)
+    private fun normalizeMac(
+        value: String
+    ): String =
+        value.trim()
+            .uppercase(Locale.US)
 
-    private fun addExcludedMac(value: String) {
-        val mac = normalizeMac(value)
+    private fun addExcludedMac(
+        value: String
+    ) {
+        val mac =
+            normalizeMac(value)
 
         if (mac.isNotEmpty()) {
             excludedMacs.add(mac)
@@ -963,36 +1786,58 @@ class MainActivity : ComponentActivity(), BleController.Events {
         for (key in keys) {
             if (json.has(key)) {
                 addExcludedMac(
-                    json.optString(key, "")
+                    json.optString(
+                        key,
+                        ""
+                    )
                 )
             }
         }
     }
 
-    private fun parseCONTROLLER(text: String) {
-        addLog("CONTROLLER -> APP: $text")
+    private fun parseCONTROLLER(
+        text: String
+    ) {
+        addLog(
+            "CONTROLLER -> APP: $text"
+        )
 
         try {
-            val json = JSONObject(text)
+            val json =
+                JSONObject(text)
 
-            when (json.optString("type")) {
-                "wifi" -> processObservation(
-                    json,
-                    "WIFI"
-                )
+            when (
+                json.optString("type")
+            ) {
+                "wifi" ->
+                    processObservation(
+                        json,
+                        "WIFI"
+                    )
 
-                "ble" -> processObservation(
-                    json,
-                    "BLE"
-                )
+                "ble" ->
+                    processObservation(
+                        json,
+                        "BLE"
+                    )
 
-                "status" -> processStatus(json)
+                "status" ->
+                    processStatus(json)
             }
         } catch (_: Exception) {
         }
     }
 
-    private fun processStatus(json: JSONObject) {
+    /*
+ * Process every status packet, but only publish the node state to the
+ * visible UI every tenth status packet.
+ *
+ * The controller's "slot" field is authoritative. JSON array order is
+ * deliberately ignored.
+ */
+    private fun processStatus(
+        json: JSONObject
+    ) {
         collectMacField(
             json,
             "wifiMac",
@@ -1007,168 +1852,461 @@ class MainActivity : ComponentActivity(), BleController.Events {
             "ble"
         )
 
-        val arr = json.optJSONArray("nodes") ?: return
+        val arr =
+            json.optJSONArray("nodes")
 
-        // Node count is unbounded — we don't assume a fixed fleet size (like the
-        // old "/ 4"). Instead we track every distinct node id we've ever heard
-        // from in lastNodeOnlineState, and derive online/total from that map.
-        // This also means it still works correctly if the controller ever sends
-        // partial/delta node lists instead of a full snapshot every time: a node
-        // not mentioned in this particular message simply keeps its last known
-        // state rather than silently vanishing from the count.
-        for (i in 0 until arr.length()) {
-            val node = arr.optJSONObject(i) ?: continue
+        if (arr != null) {
 
-            val nodeOnline = node.optBoolean("online", false)
-            val nodeId = node.optInt("id", i + 1)
+            /*
+             * Build the latest snapshot from scratch.
+             *
+             * All ten slots remain represented. Slots not present in a
+             * snapshot remain offline rather than shifting other nodes.
+             */
+            val seenSlots =
+                BooleanArray(
+                    NODE_SLOT_COUNT
+                )
 
-            val previousOnline = lastNodeOnlineState[nodeId]
+            for (i in 0 until arr.length()) {
+                val node =
+                    arr.optJSONObject(i)
+                        ?: continue
 
-            if (previousOnline != null && previousOnline != nodeOnline) {
-                if (nodeOnline) {
-                    fileLogger.write("NODE $nodeId RECONNECTED")
-                } else {
-                    fileLogger.write("NODE $nodeId DROPPED (was online, now offline)")
-                    addLog("NODE $nodeId DROPPED")
+                val slot =
+                    node.optInt(
+                        "slot",
+                        -1
+                    )
+
+                if (
+                    slot < 1 ||
+                    slot > NODE_SLOT_COUNT
+                ) {
+                    continue
                 }
+
+                /*
+                 * Record that this node has supplied a fresh status
+                 * during the current 10-node status cycle.
+                 *
+                 * nodeStatusUpdateCount is used as a bitmask here,
+                 * so duplicate reports from the same slot do not count
+                 * more than once.
+                 */
+                nodeStatusUpdateCount =
+                    nodeStatusUpdateCount or
+                            (1 shl (slot - 1))
+
+                val index =
+                    slot - 1
+
+                seenSlots[index] = true
+
+                val controllerNodeId =
+                    node.optString(
+                        "id",
+                        node.optString(
+                            "node",
+                            node.optString(
+                                "node_id",
+                                "DPS-%02d"
+                                    .format(slot)
+                            )
+                        )
+                    ).ifBlank {
+                        "DPS-%02d"
+                            .format(slot)
+                    }
+
+                val rawOnline =
+                    node.optBoolean(
+                        "online",
+                        false
+                    )
+
+                val previousDisplayed =
+                    displayedNodeStates[index].online
+
+                if (rawOnline) {
+                    nodeMissStreak[slot] = 0
+
+                    if (!previousDisplayed) {
+                        if (
+                            displayedNodeStates[index]
+                                .nodeId !=
+                            controllerNodeId
+                        ) {
+                            fileLogger.write(
+                                "NODE SLOT $slot IDENTIFIED AS $controllerNodeId"
+                            )
+                        }
+                    }
+                } else if (previousDisplayed) {
+
+                    /*
+                     * Preserve the existing 20-status offline debounce.
+                     */
+                    val misses =
+                        (
+                                nodeMissStreak[slot]
+                                    ?: 0
+                                ) + 1
+
+                    nodeMissStreak[slot] =
+                        misses
+
+                    if (
+                        misses <
+                        NODE_OFFLINE_DEBOUNCE
+                    ) {
+                        fileLogger.write(
+                            "NODE $controllerNodeId DROPPED " +
+                                    "(slot $slot, offline for $misses consecutive status updates)"
+                        )
+
+                        addLog(
+                            "NODE $controllerNodeId DROPPED"
+                        )
+                    } else {
+                        fileLogger.write(
+                            "NODE $controllerNodeId heartbeat miss " +
+                                    "$misses/$NODE_OFFLINE_DEBOUNCE " +
+                                    "(still shown online)"
+                        )
+                    }
+                } else {
+                    nodeMissStreak[slot] = 0
+                }
+
+                /*
+                 * Determine the state that should become visible when
+                 * all ten node slots have supplied a fresh status.
+                 */
+                val displayedOnline =
+                    if (rawOnline) {
+                        true
+                    } else if (
+                        previousDisplayed &&
+                        (
+                                nodeMissStreak[slot]
+                                    ?: 0
+                                ) <
+                        NODE_OFFLINE_DEBOUNCE
+                    ) {
+                        true
+                    } else {
+                        false
+                    }
+
+                val latest =
+                    latestNodeStates[index]
+
+                latest.nodeId =
+                    controllerNodeId
+
+                latest.online =
+                    displayedOnline
+
+                latest.lastHeartbeat =
+                    node.optString(
+                        "last_heartbeat",
+                        ""
+                    )
+
+                latest.wifiMac =
+                    normalizeMac(
+                        node.optString(
+                            "wifi_mac",
+                            node.optString(
+                                "wifiMac",
+                                node.optString(
+                                    "nodeWifiMac",
+                                    ""
+                                )
+                            )
+                        )
+                    )
+
+                latest.bleMac =
+                    normalizeMac(
+                        node.optString(
+                            "ble_mac",
+                            node.optString(
+                                "bleMac",
+                                node.optString(
+                                    "nodeBleMac",
+                                    ""
+                                )
+                            )
+                        )
+                    )
+
+                collectMacField(
+                    node,
+                    "wifiMac",
+                    "wifi_mac",
+                    "nodeWifiMac",
+                    "bleMac",
+                    "ble_mac",
+                    "nodeBleMac",
+                    "mac",
+                    "ble"
+                )
             }
 
-            lastNodeOnlineState[nodeId] = nodeOnline
+            /*
+             * Any slot omitted from a complete controller snapshot is
+             * treated as offline, but its fixed position is preserved.
+             */
+            for (
+            index in 0 until NODE_SLOT_COUNT
+            ) {
+                if (!seenSlots[index]) {
+                    val slot =
+                        index + 1
 
-            collectMacField(
-                node,
-                "wifiMac",
-                "wifi_mac",
-                "nodeWifiMac",
-                "node_wifi_mac",
-                "bleMac",
-                "ble_mac",
-                "nodeBleMac",
-                "node_ble_mac",
-                "mac",
-                "ble"
-            )
+                    val previousDisplayed =
+                        displayedNodeStates[index].online
+
+                    if (previousDisplayed) {
+                        val misses =
+                            (
+                                    nodeMissStreak[slot]
+                                        ?: 0
+                                    ) + 1
+
+                        nodeMissStreak[slot] =
+                            misses
+
+                        latestNodeStates[index].online =
+                            misses <
+                                    NODE_OFFLINE_DEBOUNCE
+                    } else {
+                        nodeMissStreak[slot] = 0
+
+                        latestNodeStates[index].online =
+                            false
+                    }
+
+                    latestNodeStates[index].nodeId =
+                        displayedNodeStates[index]
+                            .nodeId
+
+                    latestNodeStates[index]
+                        .lastHeartbeat =
+                        displayedNodeStates[index]
+                            .lastHeartbeat
+
+                    latestNodeStates[index]
+                        .wifiMac =
+                        displayedNodeStates[index]
+                            .wifiMac
+
+                    latestNodeStates[index]
+                        .bleMac =
+                        displayedNodeStates[index]
+                            .bleMac
+                }
+            }
         }
 
-        onlineNodes = lastNodeOnlineState.values.count { it }
-        totalNodes = lastNodeOnlineState.size
+        /*
+         * Wait until all ten unique node slots have supplied a fresh
+         * status before updating the displayed node state and dashboard.
+         */
+        val allNodeStatusesReceived =
+            (1 shl NODE_SLOT_COUNT) - 1
 
-        nodeText.text = "NODES ONLINE\n$onlineNodes / $totalNodes"
+        if (
+            nodeStatusUpdateCount ==
+            allNodeStatusesReceived
+        ) {
+            reconcileDisplayedNodes()
+
+            /*
+             * Start a completely new 10-node status cycle.
+             */
+            nodeStatusUpdateCount = 0
+        }
+    }
+
+    private fun reconcileDisplayedNodes() {
+
+        for (
+        index in 0 until NODE_SLOT_COUNT
+        ) {
+            val displayed =
+                displayedNodeStates[index]
+
+            val latest =
+                latestNodeStates[index]
+
+            displayed.nodeId =
+                latest.nodeId
+
+            displayed.online =
+                latest.online
+
+            displayed.lastHeartbeat =
+                latest.lastHeartbeat
+
+            displayed.wifiMac =
+                latest.wifiMac
+
+            displayed.bleMac =
+                latest.bleMac
+        }
+
+        onlineNodes =
+            displayedNodeStates.count {
+                it.online
+            }
+
+        totalNodes =
+            NODE_SLOT_COUNT
+
+        if (
+            ::nodeText.isInitialized
+        ) {
+            nodeText.text =
+                "NODES ONLINE\n$onlineNodes / $totalNodes"
+        }
+
+        /*
+     * If the NODES page is currently open, rebuild it only now — on the
+     * ten-status boundary — rather than on every controller packet.
+     */
+        if (showingNodesPage) {
+            updateNodesPage()
+        }
     }
 
     private fun processObservation(
         json: JSONObject,
         type: String
     ) {
-        val now = Date()
+        if(scanning ){
+            val now = Date()
 
-        if (type == "WIFI") {
-            val bssid = normalizeMac(
-                json.optString(
-                    "bssid",
-                    ""
-                )
-            )
+            if (type == "WIFI") {
 
-            if (
-                bssid.isNotEmpty() &&
-                excludedMacs.contains(bssid)
-            ) {
-                addLog(
-                    "FILTERED DPS WIFI MAC: $bssid"
-                )
-                return
+                val bssid =
+                    normalizeMac(
+                        json.optString(
+                            "bssid",
+                            ""
+                        )
+                    )
+
+                if (
+                    bssid.isNotEmpty() &&
+                    excludedMacs.contains(bssid)
+                ) {
+                    addLog(
+                        "FILTERED DPS WIFI MAC: $bssid"
+                    )
+
+                    return
+                }
+
+                if (
+                    bssid.isNotEmpty() &&
+                    !seenBssids.add(bssid)
+                ) {
+                    return
+                }
+
+            } else if (type == "BLE") {
+
+                val mac =
+                    normalizeMac(
+                        json.optString(
+                            "mac",
+                            ""
+                        )
+                    )
+
+                if (
+                    mac.isNotEmpty() &&
+                    excludedMacs.contains(mac)
+                ) {
+                    addLog(
+                        "FILTERED DPS BLE MAC: $mac"
+                    )
+
+                    return
+                }
+
+                if (
+                    mac.isNotEmpty() &&
+                    !seenBleMacs.add(mac)
+                ) {
+                    return
+                }
             }
 
-            if (
-                bssid.isNotEmpty() &&
-                !seenBssids.add(bssid)
-            ) {
-                return
-            }
-        } else if (type == "BLE") {
-            val mac = normalizeMac(
-                json.optString(
-                    "mac",
-                    ""
-                )
-            )
+            observations++
 
-            if (
-                mac.isNotEmpty() &&
-                excludedMacs.contains(mac)
-            ) {
-                addLog(
-                    "FILTERED DPS BLE MAC: $mac"
-                )
-                return
-            }
+            updateObservationUi()
 
-            if (
-                mac.isNotEmpty() &&
-                !seenBleMacs.add(mac)
-            ) {
-                return
-            }
-        }
-
-        observations++
-
-        updateObservationUi()
-
-        val name = if (type == "BLE") {
-            json.optString(
-                "name",
-                json.optString(
-                    "ssid",
+            val name =
+                if (type == "BLE") {
                     json.optString(
-                        "mac",
+                        "name",
+                        json.optString(
+                            "ssid",
+                            json.optString(
+                                "mac",
+                                "Unknown"
+                            )
+                        )
+                    )
+                } else {
+                    json.optString(
+                        "ssid",
                         "Unknown"
                     )
+                }
+
+            val rssi =
+                json.optInt(
+                    "rssi",
+                    0
                 )
-            )
-        } else {
-            json.optString(
-                "ssid",
-                "Unknown"
-            )
-        }
 
-        val rssi = json.optInt(
-            "rssi",
-            0
-        )
-
-        val node = json.optInt(
-            "node",
-            0
-        )
-
-        recent.addLast(
-            "${dateFormat.format(now)}|$type|$name|$rssi|$node"
-        )
-
-        while (recent.size > 20) {
-            recent.removeFirst()
-        }
-
-        renderRecentObservations()
-
-        if (scanning) {
-            captureRecords.add(
-                makeCaptureRecord(
-                    json,
-                    type,
-                    now
+            val node =
+                json.optInt(
+                    "node",
+                    0
                 )
+
+            recent.addLast(
+                "${dateFormat.format(now)}|$type|$name|$rssi|$node"
+            )
+
+            while (recent.size > 20) {
+                recent.removeFirst()
+            }
+
+            renderRecentObservations()
+
+            if (scanning) {
+                captureRecords.add(
+                    makeCaptureRecord(
+                        json,
+                        type,
+                        now
+                    )
+                )
+            }
+
+            addObservationMarker(
+                type,
+                name,
+                rssi
             )
         }
-
-        addObservationMarker(
-            type,
-            name,
-            rssi
-        )
     }
 
     private fun renderRecentObservations() {
@@ -1179,20 +2317,23 @@ class MainActivity : ComponentActivity(), BleController.Events {
         recentContainer.removeAllViews()
 
         if (recent.isEmpty()) {
-            recentText = tv(
-                "No observations yet.",
-                11,
-                cText1
-            ).apply {
-                includeFontPadding = false
 
-                setPadding(
-                    dp(12),
-                    dp(12),
-                    dp(12),
-                    dp(12)
-                )
-            }
+            recentText =
+                tv(
+                    "No observations yet.",
+                    11,
+                    cText1
+                ).apply {
+                    includeFontPadding =
+                        false
+
+                    setPadding(
+                        dp(12),
+                        dp(12),
+                        dp(12),
+                        dp(12)
+                    )
+                }
 
             recentContainer.addView(
                 recentText
@@ -1201,51 +2342,83 @@ class MainActivity : ComponentActivity(), BleController.Events {
             return
         }
 
-        recent.forEachIndexed { index, entry ->
-            val parts = entry.split(
-                "|",
-                limit = 5
-            )
+        recent.forEachIndexed {
+                index,
+                entry ->
+
+            val parts =
+                entry.split(
+                    "|",
+                    limit = 5
+                )
 
             if (parts.size < 5) {
                 return@forEachIndexed
             }
 
-            val time = parts[0]
-            val type = parts[1]
-            val name = parts[2]
-            val rssi = parts[3]
-            val node = parts[4]
+            val time =
+                parts[0]
 
-            val isCell = type in CELL_TYPES
+            val type =
+                parts[1]
 
-            val accent = when {
-                type == "BLE" -> cBlue
-                isCell -> cPurple
-                else -> cGreen
-            }
+            val name =
+                parts[2]
 
-            val accentDim = when {
-                type == "BLE" -> cBlueDim
-                isCell -> cPurpleDim
-                else -> cGreenDim
-            }
+            val rssi =
+                parts[3]
 
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
+            val node =
+                parts[4]
 
-                setPadding(
-                    0,
-                    dp(10),
-                    dp(10),
-                    dp(10)
-                )
-            }
+            val isCell =
+                type in CELL_TYPES
+
+            val accent =
+                when {
+                    type == "BLE" ->
+                        cBlue
+
+                    isCell ->
+                        cPurple
+
+                    else ->
+                        cGreen
+                }
+
+            val accentDim =
+                when {
+                    type == "BLE" ->
+                        cBlueDim
+
+                    isCell ->
+                        cPurpleDim
+
+                    else ->
+                        cGreenDim
+                }
+
+            val row =
+                LinearLayout(this).apply {
+                    orientation =
+                        LinearLayout.HORIZONTAL
+
+                    gravity =
+                        Gravity.CENTER_VERTICAL
+
+                    setPadding(
+                        0,
+                        dp(10),
+                        dp(10),
+                        dp(10)
+                    )
+                }
 
             row.addView(
                 View(this).apply {
-                    setBackgroundColor(accent)
+                    setBackgroundColor(
+                        accent
+                    )
                 },
                 LinearLayout.LayoutParams(
                     dp(2),
@@ -1260,22 +2433,37 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 }
             )
 
-            val icon = TextView(this).apply {
-                text = when {
-                    type == "BLE" -> "ᛒ"
-                    isCell -> "▲"
-                    else -> "⌁"
+            val icon =
+                TextView(this).apply {
+                    text =
+                        when {
+                            type == "BLE" ->
+                                "ᛒ"
+
+                            isCell ->
+                                "▲"
+
+                            else ->
+                                "⌁"
+                        }
+
+                    textSize = 15f
+
+                    gravity =
+                        Gravity.CENTER
+
+                    setTextColor(accent)
+
+                    background =
+                        ovalBg(
+                            accentDim,
+                            Color.rgb(
+                                9,
+                                14,
+                                19
+                            )
+                        )
                 }
-
-                textSize = 15f
-                gravity = Gravity.CENTER
-                setTextColor(accent)
-
-                background = ovalBg(
-                    accentDim,
-                    Color.rgb(9, 14, 19)
-                )
-            }
 
             row.addView(
                 icon,
@@ -1292,10 +2480,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 }
             )
 
-            val details = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
+            val details =
+                LinearLayout(this).apply {
+                    orientation =
+                        LinearLayout.VERTICAL
+
+                    gravity =
+                        Gravity.CENTER_VERTICAL
+                }
 
             details.addView(
                 tv(
@@ -1303,13 +2495,16 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     10,
                     accent
                 ).apply {
-                    typeface = Typeface.create(
-                        "sans-serif-condensed",
-                        Typeface.BOLD
-                    )
+                    typeface =
+                        Typeface.create(
+                            "sans-serif-condensed",
+                            Typeface.BOLD
+                        )
 
                     letterSpacing = 0.1f
-                    includeFontPadding = false
+
+                    includeFontPadding =
+                        false
 
                     setPadding(
                         0,
@@ -1326,9 +2521,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     12,
                     cText0
                 ).apply {
-                    typeface = Typeface.MONOSPACE
-                    includeFontPadding = false
+                    typeface =
+                        Typeface.MONOSPACE
+
+                    includeFontPadding =
+                        false
+
                     maxLines = 1
+
                     ellipsize =
                         android.text.TextUtils.TruncateAt.END
 
@@ -1354,7 +2554,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     10,
                     cText2
                 ).apply {
-                    includeFontPadding = false
+                    includeFontPadding =
+                        false
 
                     setPadding(
                         0,
@@ -1380,10 +2581,15 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     10,
                     cText2
                 ).apply {
-                    typeface = Typeface.MONOSPACE
+                    typeface =
+                        Typeface.MONOSPACE
+
                     gravity =
-                        Gravity.TOP or Gravity.END
-                    includeFontPadding = false
+                        Gravity.TOP or
+                                Gravity.END
+
+                    includeFontPadding =
+                        false
 
                     setPadding(
                         dp(4),
@@ -1400,7 +2606,10 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
             recentContainer.addView(row)
 
-            if (index < recent.size - 1) {
+            if (
+                index <
+                recent.size - 1
+            ) {
                 recentContainer.addView(
                     View(this).apply {
                         setBackgroundColor(
@@ -1424,20 +2633,25 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun showNodesPage() {
+        showingNodesPage = true
+
         content.removeAllViews()
 
-        val scroll = ScrollView(this)
+        val scroll =
+            ScrollView(this)
 
-        val page = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val page =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
 
-            setPadding(
-                0,
-                dp(2),
-                0,
-                dp(4)
-            )
-        }
+                setPadding(
+                    0,
+                    dp(2),
+                    0,
+                    dp(4)
+                )
+            }
 
         scroll.addView(page)
 
@@ -1456,10 +2670,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 18,
                 cText0
             ).apply {
-                typeface = Typeface.create(
-                    "sans-serif-condensed",
-                    Typeface.BOLD
-                )
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
 
                 letterSpacing = 0.04f
             }
@@ -1467,7 +2682,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         page.addView(
             tv(
-                "$onlineNodes / $totalNodes ONLINE",
+                "$onlineNodes / $NODE_SLOT_COUNT ONLINE",
                 12,
                 if (onlineNodes > 0) {
                     cGreen
@@ -1475,10 +2690,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     cRed
                 }
             ).apply {
-                typeface = Typeface.create(
-                    "sans-serif-condensed",
-                    Typeface.BOLD
-                )
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
 
                 setPadding(
                     dp(8),
@@ -1486,101 +2702,289 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     dp(8),
                     dp(6)
                 )
+
+                tag = "NODE_ONLINE_COUNT"
             }
         )
 
-        if (lastNodeOnlineState.isEmpty()) {
+        /*
+         * Build the ten physical node cards ONCE.
+         *
+         * After this page is created, status updates modify the existing
+         * TextViews instead of destroying and rebuilding the cards.
+         */
+        for (
+        index in 0 until NODE_SLOT_COUNT
+        ) {
+            val state =
+                displayedNodeStates[index]
+
+            val cardViews =
+                nodeDetailCard(state)
+
+            nodeCardViews[index] =
+                cardViews
+
             page.addView(
-                tv(
-                    "No node status received yet.",
-                    12,
-                    cText1
-                ).apply {
-                    setPadding(dp(8), dp(4), dp(8), dp(4))
-                }
+                cardViews.card
             )
-        } else {
-            // Any number of nodes is supported — this renders one card per
-            // distinct node id the controller has ever reported, sorted by id,
-            // rather than assuming a fixed fleet size.
-            for (nodeId in lastNodeOnlineState.keys.sorted()) {
-                page.addView(
-                    nodeDetailCard(
-                        nodeId,
-                        lastNodeOnlineState[nodeId] == true
-                    )
-                )
-            }
         }
 
         content.addView(scroll)
+
+        /*
+         * Restore the current scroll position after the initial page build.
+         */
+        scroll.post {
+            val maxScroll =
+                (
+                        page.height -
+                                scroll.height
+                        ).coerceAtLeast(0)
+
+            val currentY =
+                scroll.scrollY.coerceAtMost(
+                    maxScroll
+                )
+
+            scroll.scrollTo(
+                0,
+                currentY
+            )
+        }
     }
+    private fun updateNodesPage() {
 
-    private fun nodeDetailCard(
-        id: Int,
-        online: Boolean
-    ): View {
-        // Cycles through a fixed palette by id rather than hard-coding 4 slots,
-        // so a fleet of 50 nodes still gets varied, distinguishable colors
-        // instead of every id past 3 collapsing to the same fallback color.
-        val nodeAccentPalette = listOf(
-            cGreen,
-            cBlue,
-            color("#FFB454"),
-            cPurple,
-            color("#FF7AB8"),
-            color("#4DD0E1")
-        )
+        if (!showingNodesPage) {
+            return
+        }
 
-        val accent = nodeAccentPalette[(id - 1).mod(nodeAccentPalette.size)]
+        for (
+        index in 0 until NODE_SLOT_COUNT
+        ) {
 
-        val status =
-            if (online) "ONLINE"
-            else "OFFLINE"
+            val views =
+                nodeCardViews[index]
+                    ?: continue
 
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+            val state =
+                displayedNodeStates[index]
 
-            setPadding(
-                dp(12),
-                dp(10),
-                dp(12),
-                dp(10)
+            val nodeAccentPalette =
+                listOf(
+                    cGreen,
+                    cBlue,
+                    color("#FFB454"),
+                    cPurple,
+                    color("#FF7AB8"),
+                    color("#4DD0E1")
+                )
+
+            val accent =
+                nodeAccentPalette[
+                    (state.slot - 1)
+                        .mod(
+                            nodeAccentPalette.size
+                        )
+                ]
+
+            val status =
+                if (state.online) {
+                    "ONLINE"
+                } else {
+                    "OFFLINE"
+                }
+
+            val statusColor =
+                if (state.online) {
+                    cGreen
+                } else {
+                    cRed
+                }
+
+            /*
+             * Update only the existing views.
+             */
+            views.statusDot.setTextColor(
+                statusColor
             )
 
-            background = cardBg(
-                cLine,
-                cPanel,
-                dp(4).toFloat(),
-                dp(1)
+            views.slotText.setTextColor(
+                accent
             )
 
-            layoutParams =
-                LinearLayout.LayoutParams(
-                    -1,
-                    dp(78)
-                ).apply {
-                    setMargins(
-                        dp(3),
-                        dp(3),
-                        dp(3),
-                        dp(3)
+            views.nodeIdText.text =
+                state.nodeId
+
+            views.statusText.text =
+                status
+
+            views.statusText.setTextColor(
+                statusColor
+            )
+
+            val connectionInfo =
+                if (
+                    state.wifiMac.isNotBlank() ||
+                    state.bleMac.isNotBlank()
+                ) {
+
+                    val parts =
+                        ArrayList<String>()
+
+                    if (
+                        state.wifiMac.isNotBlank()
+                    ) {
+                        parts.add(
+                            "Wi-Fi ${state.wifiMac}"
+                        )
+                    }
+
+                    if (
+                        state.bleMac.isNotBlank()
+                    ) {
+                        parts.add(
+                            "BLE ${state.bleMac}"
+                        )
+                    }
+
+                    parts.joinToString(
+                        "  •  "
                     )
+
+                } else {
+                    if (state.online) {
+                        "Connected to controller"
+                    } else {
+                        "Waiting for connection"
+                    }
+                }
+
+            views.connectionText.text =
+                connectionInfo
+
+            views.heartbeatText.text =
+                if (
+                    state.lastHeartbeat.isNotBlank()
+                ) {
+                    "LAST HEARTBEAT  ${state.lastHeartbeat}"
+                } else {
+                    ""
                 }
         }
 
-        val top = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
+        /*
+         * Update the header count without rebuilding the page.
+         */
+        val onlineHeader =
+            content.findViewWithTag<TextView>(
+                "NODE_ONLINE_COUNT"
+            )
 
-        top.addView(
+        onlineHeader?.apply {
+            text =
+                "$onlineNodes / $NODE_SLOT_COUNT ONLINE"
+
+            setTextColor(
+                if (onlineNodes > 0) {
+                    cGreen
+                } else {
+                    cRed
+                }
+            )
+        }
+    }
+    private fun nodeDetailCard(
+        state: NodeState
+    ): NodeCardViews {
+
+        val nodeAccentPalette =
+            listOf(
+                cGreen,
+                cBlue,
+                color("#FFB454"),
+                cPurple,
+                color("#FF7AB8"),
+                color("#4DD0E1")
+            )
+
+        val accent =
+            nodeAccentPalette[
+                (state.slot - 1)
+                    .mod(
+                        nodeAccentPalette.size
+                    )
+            ]
+
+        val status =
+            if (state.online) {
+                "ONLINE"
+            } else {
+                "OFFLINE"
+            }
+
+        val statusColor =
+            if (state.online) {
+                cGreen
+            } else {
+                cRed
+            }
+
+        val card =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
+
+                setPadding(
+                    dp(12),
+                    dp(10),
+                    dp(12),
+                    dp(10)
+                )
+
+                background =
+                    cardBg(
+                        cLine,
+                        cPanel,
+                        dp(4).toFloat(),
+                        dp(1)
+                    )
+
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        -1,
+                        -2
+                    ).apply {
+                        setMargins(
+                            dp(3),
+                            dp(3),
+                            dp(3),
+                            dp(3)
+                        )
+                    }
+            }
+
+        val top =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER_VERTICAL
+            }
+
+        val statusDot =
             tv(
                 "●",
                 17,
-                accent
+                statusColor
             ).apply {
-                gravity = Gravity.CENTER
+                gravity =
+                    Gravity.CENTER
+
+                setTextColor(
+                    statusColor
+                )
 
                 setPadding(
                     0,
@@ -1588,26 +2992,61 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     dp(6),
                     0
                 )
-            },
+            }
+
+        top.addView(
+            statusDot,
             LinearLayout.LayoutParams(
                 dp(24),
                 dp(28)
             )
         )
 
-        top.addView(
+        val slotText =
             tv(
-                "DPS-%02d".format(id),
+                "SLOT ${state.slot}",
+                10,
+                accent
+            ).apply {
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
+
+                includeFontPadding =
+                    false
+
+                setPadding(
+                    0,
+                    0,
+                    dp(8),
+                    0
+                )
+            }
+
+        top.addView(
+            slotText
+        )
+
+        val nodeIdText =
+            tv(
+                state.nodeId,
                 15,
                 cText0
             ).apply {
-                typeface = Typeface.create(
-                    "sans-serif-condensed",
-                    Typeface.BOLD
-                )
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
 
-                includeFontPadding = false
-            },
+                includeFontPadding =
+                    false
+            }
+
+        top.addView(
+            nodeIdText,
             LinearLayout.LayoutParams(
                 0,
                 -2,
@@ -1615,36 +3054,76 @@ class MainActivity : ComponentActivity(), BleController.Events {
             )
         )
 
-        top.addView(
+        val statusText =
             tv(
                 status,
                 11,
-                accent
+                statusColor
             ).apply {
-                typeface = Typeface.create(
-                    "sans-serif-condensed",
-                    Typeface.BOLD
-                )
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
 
-                includeFontPadding = false
+                includeFontPadding =
+                    false
             }
+
+        top.addView(
+            statusText
         )
 
         card.addView(top)
 
-        card.addView(
+        val connectionInfo =
+            if (
+                state.wifiMac.isNotBlank() ||
+                state.bleMac.isNotBlank()
+            ) {
+
+                val parts =
+                    ArrayList<String>()
+
+                if (
+                    state.wifiMac.isNotBlank()
+                ) {
+                    parts.add(
+                        "Wi-Fi ${state.wifiMac}"
+                    )
+                }
+
+                if (
+                    state.bleMac.isNotBlank()
+                ) {
+                    parts.add(
+                        "BLE ${state.bleMac}"
+                    )
+                }
+
+                parts.joinToString(
+                    "  •  "
+                )
+
+            } else {
+                if (state.online) {
+                    "Connected to controller"
+                } else {
+                    "Waiting for connection"
+                }
+            }
+
+        val connectionText =
             tv(
-                "Scanner node $id   •   ${
-                    if (online) {
-                        "Connected to controller"
-                    } else {
-                        "Waiting for connection"
-                    }
-                }",
+                connectionInfo,
                 10,
                 cText1
             ).apply {
-                includeFontPadding = false
+                includeFontPadding =
+                    false
+
+                typeface =
+                    Typeface.MONOSPACE
 
                 setPadding(
                     dp(30),
@@ -1653,29 +3132,77 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     0
                 )
             }
+
+        card.addView(
+            connectionText
         )
 
-        return card
+        val heartbeatText =
+            tv(
+                if (
+                    state.lastHeartbeat.isNotBlank()
+                ) {
+                    "LAST HEARTBEAT  ${state.lastHeartbeat}"
+                } else {
+                    ""
+                },
+                9,
+                cText2
+            ).apply {
+                includeFontPadding =
+                    false
+
+                typeface =
+                    Typeface.MONOSPACE
+
+                setPadding(
+                    dp(30),
+                    dp(3),
+                    0,
+                    0
+                )
+            }
+
+        card.addView(
+            heartbeatText
+        )
+
+        return NodeCardViews(
+            card = card,
+            statusDot = statusDot,
+            slotText = slotText,
+            nodeIdText = nodeIdText,
+            statusText = statusText,
+            connectionText = connectionText,
+            heartbeatText = heartbeatText
+        )
     }
+
 
     private fun makeCaptureRecord(
         json: JSONObject,
         type: String,
         timestamp: Date
     ): CaptureRecord {
-        val location = lastLocation
+
+        val location =
+            lastLocation
 
         val mac =
             if (type == "BLE") {
                 json.optString(
                     "mac",
                     ""
-                ).trim().uppercase(Locale.US)
+                )
+                    .trim()
+                    .uppercase(Locale.US)
             } else {
                 json.optString(
                     "bssid",
                     ""
-                ).trim().uppercase(Locale.US)
+                )
+                    .trim()
+                    .uppercase(Locale.US)
             }
 
         val name =
@@ -1729,19 +3256,23 @@ class MainActivity : ComponentActivity(), BleController.Events {
             )
 
         val altitude =
-            location?.altitude?.toString()
+            location?.altitude
+                ?.toString()
                 ?: ""
 
         val accuracy =
-            location?.accuracy?.toString()
+            location?.accuracy
+                ?.toString()
                 ?: ""
 
         val latitude =
-            location?.latitude?.toString()
+            location?.latitude
+                ?.toString()
                 ?: ""
 
         val longitude =
-            location?.longitude?.toString()
+            location?.longitude
+                ?.toString()
                 ?: ""
 
         val rcois =
@@ -1768,7 +3299,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
             frequency = frequency,
             rssi = rssi,
             firstSeenUtc =
-                exportDateFormat.format(timestamp),
+                exportDateFormat.format(
+                    timestamp
+                ),
             latitude = latitude,
             longitude = longitude,
             altitude = altitude,
@@ -1778,11 +3311,19 @@ class MainActivity : ComponentActivity(), BleController.Events {
         )
     }
 
-    private fun csv(value: String): String =
-        "\"${value.replace("\"", "\"\"")}\""
+    private fun csv(
+        value: String
+    ): String =
+        "\"${
+            value.replace(
+                "\"",
+                "\"\""
+            )
+        }\""
 
     private fun buildWigleCsv(): String {
-        val out = StringBuilder()
+        val out =
+            StringBuilder()
 
         out.append(
             "WigleWifi-1.6,appRelease=1.0,"
@@ -1803,6 +3344,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
         )
 
         for (record in captureRecords) {
+
             out.append(
                 csv(record.mac)
             ).append(',')
@@ -1863,6 +3405,209 @@ class MainActivity : ComponentActivity(), BleController.Events {
         return out.toString()
     }
 
+    private fun uploadAll() {
+        val wigleNameValue =
+            wigleName.text
+                ?.toString()
+                ?.trim()
+                .orEmpty()
+
+        val wigleTokenValue =
+            wigleToken.text
+                ?.toString()
+                ?.trim()
+                .orEmpty()
+
+        val wdgWarsKeyValue =
+            wdgWarsKey.text
+                ?.toString()
+                ?.trim()
+                .orEmpty()
+
+        val wardriftUsernameValue =
+            wardriftUsername.text
+                ?.toString()
+                ?.trim()
+                .orEmpty()
+
+        val wardriftPasswordValue =
+            wardriftPassword.text
+                ?.toString()
+                ?.trim()
+                .orEmpty()
+
+        val wigleReady =
+            wigleNameValue.isNotEmpty() &&
+                    wigleTokenValue.isNotEmpty()
+
+        val wdgWarsReady =
+            wdgWarsKeyValue.isNotEmpty()
+
+        val wardriftReady =
+            wardriftUsernameValue.isNotEmpty() &&
+                    wardriftPasswordValue.isNotEmpty()
+
+        if (!wigleReady && !wdgWarsReady && !wardriftReady) {
+            addLog(
+                "UPLOAD ALL requested but no upload credentials are configured"
+            )
+
+            Toast.makeText(
+                this,
+                "Enter at least one upload service credential first",
+                Toast.LENGTH_SHORT
+            ).show()
+
+            return
+        }
+
+        if (captureRecords.isEmpty()) {
+            addLog(
+                "UPLOAD ALL requested with no captured observations"
+            )
+
+            Toast.makeText(
+                this,
+                "No captured observations to upload",
+                Toast.LENGTH_SHORT
+            ).show()
+
+            return
+        }
+
+        // Generate and save the CSV exactly once. The same filename and
+        // byte array are then reused for every service whose credentials exist.
+        val saved =
+            saveWigleCsvToDownloads()
+                ?: return
+
+        val fileName = saved.fileName
+        val data = saved.data
+
+        addLog(
+            "UPLOAD ALL started ($fileName, ${captureRecords.size} records)"
+        )
+
+        Thread {
+            var uploaded = 0
+            var skipped = 0
+
+            if (wigleReady) {
+                try {
+                    val auth =
+                        "Basic " +
+                                Base64.encodeToString(
+                                    "$wigleNameValue:$wigleTokenValue"
+                                        .toByteArray(Charsets.UTF_8),
+                                    Base64.NO_WRAP
+                                )
+
+                    val (code, body) =
+                        multipartUpload(
+                            urlStr =
+                                "https://api.wigle.net/api/v2/file/upload",
+                            headers =
+                                mapOf(
+                                    "Authorization" to auth,
+                                    "Accept" to "application/json"
+                                ),
+                            fields =
+                                mapOf("donate" to "false"),
+                            fileFieldName = "file",
+                            fileName = fileName,
+                            fileBytes = data,
+                            fileContentType = "text/csv"
+                        )
+
+                    val success =
+                        code in 200..299 &&
+                                body.contains("\"success\":true")
+
+                    if (success) uploaded++ else skipped++
+
+                    addLog(
+                        "WiGLE upload response ($code): $body"
+                    )
+                } catch (e: Exception) {
+                    skipped++
+                    addLog(
+                        "WiGLE upload failed: ${e.message ?: "unknown error"}"
+                    )
+                }
+            }
+
+            if (wdgWarsReady) {
+                try {
+                    val (code, body) =
+                        multipartUpload(
+                            urlStr =
+                                "https://wdgwars.pl/api/upload-csv",
+                            headers =
+                                mapOf(
+                                    "X-API-Key" to wdgWarsKeyValue
+                                ),
+                            fields = emptyMap(),
+                            fileFieldName = "file",
+                            fileName = fileName,
+                            fileBytes = data,
+                            fileContentType = "text/csv"
+                        )
+
+                    val ok = code in 200..299
+                    if (ok) uploaded++ else skipped++
+
+                    addLog(
+                        "WDGWars upload response ($code): $body"
+                    )
+                } catch (e: Exception) {
+                    skipped++
+                    addLog(
+                        "WDGWars upload failed: ${e.message ?: "unknown error"}"
+                    )
+                }
+            }
+
+            if (wardriftReady) {
+                try {
+                    val result =
+                        uploadWardriftData(
+                            fileName = fileName,
+                            data = data,
+                            username = wardriftUsernameValue,
+                            password = wardriftPasswordValue
+                        )
+
+                    if (result.first) {
+                        uploaded++
+                    } else {
+                        skipped++
+                    }
+
+                    addLog(
+                        "Wardrift upload response (${result.second.first}): ${result.second.second}"
+                    )
+                } catch (e: Exception) {
+                    skipped++
+                    addLog(
+                        "Wardrift upload failed: ${e.message ?: "unknown error"}"
+                    )
+                }
+            }
+
+            runOnUiThread {
+                addLog(
+                    "UPLOAD ALL finished: $uploaded uploaded, $skipped failed/skipped"
+                )
+
+                Toast.makeText(
+                    this,
+                    "UPLOAD ALL finished: $uploaded uploaded",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }.start()
+    }
+
     private fun uploadToWigle() {
         val name =
             wigleName.text
@@ -1903,11 +3648,15 @@ class MainActivity : ComponentActivity(), BleController.Events {
             return
         }
 
-        val saved = saveWigleCsvToDownloads()
-            ?: return
+        val saved =
+            saveWigleCsvToDownloads()
+                ?: return
 
-        val fileName = saved.fileName
-        val data = saved.data
+        val fileName =
+            saved.fileName
+
+        val data =
+            saved.data
 
         addLog(
             "WiGLE upload started " +
@@ -1916,11 +3665,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         Thread {
             try {
+
                 val auth =
                     "Basic " +
                             Base64.encodeToString(
                                 "$name:$token"
-                                    .toByteArray(Charsets.UTF_8),
+                                    .toByteArray(
+                                        Charsets.UTF_8
+                                    ),
                                 Base64.NO_WRAP
                             )
 
@@ -1937,9 +3689,12 @@ class MainActivity : ComponentActivity(), BleController.Events {
                             mapOf(
                                 "donate" to "false"
                             ),
-                        fileFieldName = "file",
-                        fileName = fileName,
-                        fileBytes = data,
+                        fileFieldName =
+                            "file",
+                        fileName =
+                            fileName,
+                        fileBytes =
+                            data,
                         fileContentType =
                             "text/csv"
                     )
@@ -1966,7 +3721,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
                         Toast.LENGTH_LONG
                     ).show()
                 }
+
             } catch (e: Exception) {
+
                 runOnUiThread {
                     addLog(
                         "WiGLE upload failed: " +
@@ -2014,11 +3771,15 @@ class MainActivity : ComponentActivity(), BleController.Events {
             return
         }
 
-        val saved = saveWigleCsvToDownloads()
-            ?: return
+        val saved =
+            saveWigleCsvToDownloads()
+                ?: return
 
-        val fileName = saved.fileName
-        val data = saved.data
+        val fileName =
+            saved.fileName
+
+        val data =
+            saved.data
 
         addLog(
             "WDGWars upload started " +
@@ -2027,6 +3788,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         Thread {
             try {
+
                 val (code, body) =
                     multipartUpload(
                         urlStr =
@@ -2037,9 +3799,12 @@ class MainActivity : ComponentActivity(), BleController.Events {
                             ),
                         fields =
                             emptyMap(),
-                        fileFieldName = "file",
-                        fileName = fileName,
-                        fileBytes = data,
+                        fileFieldName =
+                            "file",
+                        fileName =
+                            fileName,
+                        fileBytes =
+                            data,
                         fileContentType =
                             "text/csv"
                     )
@@ -2063,7 +3828,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
                         Toast.LENGTH_LONG
                     ).show()
                 }
+
             } catch (e: Exception) {
+
                 runOnUiThread {
                     addLog(
                         "WDGWars upload failed: " +
@@ -2080,6 +3847,330 @@ class MainActivity : ComponentActivity(), BleController.Events {
         }.start()
     }
 
+
+
+    private fun signInAndGetWardriftToken(
+        username: String,
+        password: String
+    ): String {
+        val payload =
+            JSONObject()
+                .put("username", username)
+                .put("password", password)
+                .toString()
+
+        val conn =
+            (
+                    java.net.URL(
+                        "https://wardrift.net/v1/auth/sign-in/username"
+                    ).openConnection()
+                            as java.net.HttpURLConnection
+                    ).apply {
+                    requestMethod = "POST"
+                    doOutput = true
+                    connectTimeout = 20000
+                    readTimeout = 30000
+                    setRequestProperty(
+                        "Content-Type",
+                        "application/json"
+                    )
+                    setRequestProperty(
+                        "Accept",
+                        "application/json"
+                    )
+                }
+
+        conn.outputStream.use { out ->
+            out.write(
+                payload.toByteArray(Charsets.UTF_8)
+            )
+            out.flush()
+        }
+
+        val code = conn.responseCode
+        val body =
+            try {
+                val stream =
+                    if (code in 200..299) {
+                        conn.inputStream
+                    } else {
+                        conn.errorStream
+                    }
+
+                stream?.bufferedReader()?.use { it.readText() }
+                    ?: ""
+            } catch (_: Exception) {
+                ""
+            }
+
+        if (code !in 200..299) {
+            throw IllegalStateException(
+                "HTTP $code${if (body.isNotBlank()) ": $body" else ""}"
+            )
+        }
+
+        val json =
+            try {
+                JSONObject(body)
+            } catch (e: Exception) {
+                throw IllegalStateException(
+                    "Wardrift returned invalid sign-in JSON"
+                )
+            }
+
+        val token =
+            findWardriftToken(json)
+                .orEmpty()
+
+        if (token.isEmpty()) {
+            throw IllegalStateException(
+                "Signed in, but no session token came back"
+            )
+        }
+
+        return token
+    }
+
+    private fun findWardriftToken(
+        json: JSONObject
+    ): String? {
+        val preferredKeys =
+            listOf(
+                "token",
+                "sessionToken",
+                "session_token",
+                "accessToken",
+                "access_token"
+            )
+
+        for (key in preferredKeys) {
+            if (json.has(key) && !json.isNull(key)) {
+                val value =
+                    json.optString(key, "").trim()
+
+                if (value.isNotEmpty()) {
+                    return value
+                }
+            }
+        }
+
+        val keys = json.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val value = json.opt(key)
+
+            if (value is JSONObject) {
+                val nested =
+                    findWardriftToken(value)
+
+                if (!nested.isNullOrBlank()) {
+                    return nested
+                }
+            }
+        }
+
+        return null
+    }
+
+    private fun uploadWardriftData(
+        fileName: String,
+        data: ByteArray,
+        username: String,
+        password: String
+    ): Pair<Boolean, Pair<Int, String>> {
+
+        var token =
+            prefs.getString(
+                "wardrift_session_token",
+                ""
+            )
+                ?.trim()
+                .orEmpty()
+
+        if (token.isEmpty()) {
+            token =
+                signInAndGetWardriftToken(
+                    username,
+                    password
+                )
+
+            prefs.edit()
+                .putString(
+                    "wardrift_session_token",
+                    token
+                )
+                .apply()
+        }
+
+        var result =
+            multipartUpload(
+                urlStr =
+                    "https://wardrift.net/v1/wardrive/logs",
+                headers =
+                    mapOf(
+                        "Authorization" to
+                                "Bearer $token",
+                        "Accept" to
+                                "application/json"
+                    ),
+                fields =
+                    mapOf(
+                        "public_route" to
+                                "true"
+                    ),
+                fileFieldName =
+                    "file",
+                fileName =
+                    fileName,
+                fileBytes =
+                    data,
+                fileContentType =
+                    "text/csv"
+            )
+
+        if (result.first == 401) {
+            addLog(
+                "Wardrift session expired; signing in again"
+            )
+
+            token =
+                signInAndGetWardriftToken(
+                    username,
+                    password
+                )
+
+            prefs.edit()
+                .putString(
+                    "wardrift_session_token",
+                    token
+                )
+                .apply()
+
+            result =
+                multipartUpload(
+                    urlStr =
+                        "https://wardrift.net/v1/wardrive/logs",
+                    headers =
+                        mapOf(
+                            "Authorization" to
+                                    "Bearer $token",
+                            "Accept" to
+                                    "application/json"
+                        ),
+                    fields =
+                        mapOf(
+                            "public_route" to
+                                    "true"
+                        ),
+                    fileFieldName =
+                        "file",
+                    fileName =
+                        fileName,
+                    fileBytes =
+                        data,
+                    fileContentType =
+                        "text/csv"
+                )
+        }
+
+        return Pair(
+            result.first in 200..299,
+            result
+        )
+    }
+
+    private fun uploadToWardrift() {
+        val username =
+            wardriftUsername.text
+                ?.toString()
+                ?.trim()
+                .orEmpty()
+
+        val password =
+            wardriftPassword.text
+                ?.toString()
+                ?.trim()
+                .orEmpty()
+
+        if (username.isEmpty() || password.isEmpty()) {
+            Toast.makeText(
+                this,
+                "Enter your Wardrift username and password first",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        if (captureRecords.isEmpty()) {
+            addLog(
+                "Wardrift upload requested with no captured observations"
+            )
+
+            Toast.makeText(
+                this,
+                "No captured observations to upload",
+                Toast.LENGTH_SHORT
+            ).show()
+
+            return
+        }
+
+        val saved =
+            saveWigleCsvToDownloads()
+                ?: return
+
+        val fileName = saved.fileName
+        val data = saved.data
+
+        addLog(
+            "Wardrift upload started ($fileName, ${captureRecords.size} records)"
+        )
+
+        Thread {
+            try {
+                val result =
+                    uploadWardriftData(
+                        fileName = fileName,
+                        data = data,
+                        username = username,
+                        password = password
+                    )
+
+                val code = result.second.first
+                val body = result.second.second
+                val ok = result.first
+
+                runOnUiThread {
+                    addLog(
+                        "Wardrift upload response ($code): $body"
+                    )
+
+                    Toast.makeText(
+                        this,
+                        if (ok) {
+                            "Uploaded to Wardrift"
+                        } else {
+                            "Wardrift upload failed — see Monitor log"
+                        },
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    addLog(
+                        "Wardrift upload failed: ${e.message ?: "unknown error"}"
+                    )
+
+                    Toast.makeText(
+                        this,
+                        "Wardrift upload failed — see Monitor log",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }.start()
+    }
+
     private fun multipartUpload(
         urlStr: String,
         headers: Map<String, String>,
@@ -2089,37 +4180,49 @@ class MainActivity : ComponentActivity(), BleController.Events {
         fileBytes: ByteArray,
         fileContentType: String
     ): Pair<Int, String> {
+
         val boundary =
             "----DPSBoundary${System.currentTimeMillis()}"
 
         val conn =
-            (java.net.URL(urlStr).openConnection()
-                    as java.net.HttpURLConnection).apply {
+            (
+                    java.net.URL(urlStr)
+                        .openConnection()
+                            as java.net.HttpURLConnection
+                    ).apply {
 
-                requestMethod = "POST"
-                doOutput = true
-                connectTimeout = 20000
-                readTimeout = 60000
+                    requestMethod = "POST"
 
-                setChunkedStreamingMode(0)
+                    doOutput = true
 
-                setRequestProperty(
-                    "Content-Type",
-                    "multipart/form-data; boundary=$boundary"
-                )
+                    connectTimeout = 20000
 
-                headers.forEach { (k, v) ->
-                    setRequestProperty(k, v)
+                    readTimeout = 60000
+
+                    setChunkedStreamingMode(0)
+
+                    setRequestProperty(
+                        "Content-Type",
+                        "multipart/form-data; boundary=$boundary"
+                    )
+
+                    headers.forEach { (k, v) ->
+                        setRequestProperty(
+                            k,
+                            v
+                        )
+                    }
                 }
-            }
 
         conn.outputStream.use { out ->
+
             val writer =
                 out.bufferedWriter(
                     Charsets.UTF_8
                 )
 
             fields.forEach { (name, value) ->
+
                 writer.write(
                     "--$boundary\r\n"
                 )
@@ -2151,6 +4254,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
             writer.flush()
 
             out.write(fileBytes)
+
             out.flush()
 
             writer.write(
@@ -2160,7 +4264,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
             writer.flush()
         }
 
-        val code = conn.responseCode
+        val code =
+            conn.responseCode
 
         val stream =
             if (code in 200..299) {
@@ -2184,8 +4289,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
         return code to body
     }
 
-    private fun saveWigleCsvToDownloads(): SavedCsv? {
+    private fun saveWigleCsvToDownloads():
+            SavedCsv? {
+
         if (captureRecords.isEmpty()) {
+
             addLog(
                 "WiGLE export requested with no captured observations"
             )
@@ -2214,29 +4322,36 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 )
 
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.Q
+            ) {
+
                 val values =
-                    android.content.ContentValues().apply {
-                        put(
-                            MediaStore.Downloads.DISPLAY_NAME,
-                            fileName
-                        )
+                    android.content.ContentValues()
+                        .apply {
 
-                        put(
-                            MediaStore.Downloads.MIME_TYPE,
-                            "text/csv"
-                        )
+                            put(
+                                MediaStore.Downloads.DISPLAY_NAME,
+                                fileName
+                            )
 
-                        put(
-                            MediaStore.Downloads.RELATIVE_PATH,
-                            Environment.DIRECTORY_DOWNLOADS
-                        )
+                            put(
+                                MediaStore.Downloads.MIME_TYPE,
+                                "text/csv"
+                            )
 
-                        put(
-                            MediaStore.Downloads.IS_PENDING,
-                            1
-                        )
-                    }
+                            put(
+                                MediaStore.Downloads.RELATIVE_PATH,
+                                Environment.DIRECTORY_DOWNLOADS
+                            )
+
+                            put(
+                                MediaStore.Downloads.IS_PENDING,
+                                1
+                            )
+                        }
 
                 val uri =
                     contentResolver.insert(
@@ -2248,6 +4363,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                         )
 
                 try {
+
                     contentResolver
                         .openOutputStream(uri)
                         ?.use {
@@ -2270,7 +4386,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
                         null,
                         null
                     )
+
                 } catch (e: Exception) {
+
                     contentResolver.delete(
                         uri,
                         null,
@@ -2279,7 +4397,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
                     throw e
                 }
+
             } else {
+
                 @Suppress("DEPRECATION")
                 val downloads =
                     Environment
@@ -2321,7 +4441,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 fileName = fileName,
                 data = data
             )
+
         } catch (e: Exception) {
+
             addLog(
                 "WiGLE CSV save failed: " +
                         "${e.message ?: "unknown error"}"
@@ -2338,9 +4460,15 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun exportDebugLogToDownloads() {
-        val file = fileLogger.currentFile()
 
-        if (file == null || !file.exists() || file.length() == 0L) {
+        val file =
+            fileLogger.currentFile()
+
+        if (
+            file == null ||
+            !file.exists() ||
+            file.length() == 0L
+        ) {
             Toast.makeText(
                 this,
                 "No debug log data yet",
@@ -2352,66 +4480,133 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         fileLogger.flush()
 
-        val fileName = file.name
+        val fileName =
+            file.name
 
         try {
-            val data = file.readBytes()
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val data =
+                file.readBytes()
+
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.Q
+            ) {
+
                 val values =
-                    android.content.ContentValues().apply {
-                        put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                        put(MediaStore.Downloads.MIME_TYPE, "text/plain")
-                        put(
-                            MediaStore.Downloads.RELATIVE_PATH,
-                            Environment.DIRECTORY_DOWNLOADS
-                        )
-                        put(MediaStore.Downloads.IS_PENDING, 1)
-                    }
+                    android.content.ContentValues()
+                        .apply {
+
+                            put(
+                                MediaStore.Downloads.DISPLAY_NAME,
+                                fileName
+                            )
+
+                            put(
+                                MediaStore.Downloads.MIME_TYPE,
+                                "text/plain"
+                            )
+
+                            put(
+                                MediaStore.Downloads.RELATIVE_PATH,
+                                Environment.DIRECTORY_DOWNLOADS
+                            )
+
+                            put(
+                                MediaStore.Downloads.IS_PENDING,
+                                1
+                            )
+                        }
 
                 val uri =
                     contentResolver.insert(
                         MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                         values
-                    ) ?: throw java.io.IOException("Unable to create Downloads file")
+                    )
+                        ?: throw java.io.IOException(
+                            "Unable to create Downloads file"
+                        )
 
                 try {
-                    contentResolver.openOutputStream(uri)?.use {
-                        it.write(data)
-                    } ?: throw java.io.IOException("Unable to open Downloads file")
+
+                    contentResolver
+                        .openOutputStream(uri)
+                        ?.use {
+                            it.write(data)
+                        }
+                        ?: throw java.io.IOException(
+                            "Unable to open Downloads file"
+                        )
 
                     values.clear()
-                    values.put(MediaStore.Downloads.IS_PENDING, 0)
-                    contentResolver.update(uri, values, null, null)
-                } catch (e: Exception) {
-                    contentResolver.delete(uri, null, null)
-                    throw e
-                }
-            } else {
-                @Suppress("DEPRECATION")
-                val downloads =
-                    Environment.getExternalStoragePublicDirectory(
-                        Environment.DIRECTORY_DOWNLOADS
+
+                    values.put(
+                        MediaStore.Downloads.IS_PENDING,
+                        0
                     )
 
-                if (!downloads.exists() && !downloads.mkdirs()) {
-                    throw java.io.IOException("Unable to create Downloads directory")
+                    contentResolver.update(
+                        uri,
+                        values,
+                        null,
+                        null
+                    )
+
+                } catch (e: Exception) {
+
+                    contentResolver.delete(
+                        uri,
+                        null,
+                        null
+                    )
+
+                    throw e
                 }
 
-                FileOutputStream(File(downloads, fileName)).use {
+            } else {
+
+                @Suppress("DEPRECATION")
+                val downloads =
+                    Environment
+                        .getExternalStoragePublicDirectory(
+                            Environment.DIRECTORY_DOWNLOADS
+                        )
+
+                if (
+                    !downloads.exists() &&
+                    !downloads.mkdirs()
+                ) {
+                    throw java.io.IOException(
+                        "Unable to create Downloads directory"
+                    )
+                }
+
+                FileOutputStream(
+                    File(
+                        downloads,
+                        fileName
+                    )
+                ).use {
                     it.write(data)
                 }
             }
 
-            addLog("DEBUG LOG exported to Downloads: $fileName")
+            addLog(
+                "DEBUG LOG exported to Downloads: $fileName"
+            )
 
             Toast.makeText(
                 this,
                 "Debug log saved to Downloads: $fileName",
                 Toast.LENGTH_LONG
             ).show()
+
         } catch (e: Exception) {
-            addLog("DEBUG LOG export failed: ${e.message ?: "unknown error"}")
+
+            addLog(
+                "DEBUG LOG export failed: " +
+                        "${e.message ?: "unknown error"}"
+            )
 
             Toast.makeText(
                 this,
@@ -2423,12 +4618,17 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
     @SuppressLint("MissingPermission")
     private fun startMap() {
+
         mapView.onResume()
 
-        mapView.controller.setZoom(16.0)
+        mapView.controller.setZoom(
+            16.0
+        )
 
         if (hasLocationPermission()) {
+
             try {
+
                 val gpsEnabled =
                     locationManager.isProviderEnabled(
                         LocationManager.GPS_PROVIDER
@@ -2440,6 +4640,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     )
 
                 if (gpsEnabled) {
+
                     locationManager.requestLocationUpdates(
                         LocationManager.GPS_PROVIDER,
                         1000L,
@@ -2449,6 +4650,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 }
 
                 if (networkEnabled) {
+
                     locationManager.requestLocationUpdates(
                         LocationManager.NETWORK_PROVIDER,
                         2000L,
@@ -2456,6 +4658,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                         locationListener
                     )
                 }
+
             } catch (_: SecurityException) {
             }
         }
@@ -2468,6 +4671,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun updateTravelPath(
         location: Location
     ) {
+
         if (!::mapView.isInitialized) {
             return
         }
@@ -2482,6 +4686,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
             trackPoints.lastOrNull()
 
         if (last != null) {
+
             val distance =
                 floatArrayOf(0f)
 
@@ -2501,10 +4706,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
         trackPoints.add(point)
 
         if (trackLine == null) {
+
             trackLine =
                 Polyline(mapView).apply {
-                    title = "DPS TRAVEL PATH"
-                    width = dp(4).toFloat()
+                    title =
+                        "DPS TRAVEL PATH"
+
+                    width =
+                        dp(4).toFloat()
                 }
 
             mapView.overlays.add(
@@ -2520,9 +4729,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun clearTravelPath() {
+
         trackPoints.clear()
 
         if (::mapView.isInitialized) {
+
             trackLine?.let {
                 mapView.overlays.remove(it)
             }
@@ -2536,7 +4747,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun updateGpsUi(
         location: Location
     ) {
+
         if (::gpsText.isInitialized) {
+
             gpsText.text =
                 String.format(
                     Locale.US,
@@ -2549,9 +4762,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun updateObservationUi() {
+
         updateStealthCounters()
 
         if (::observationText.isInitialized) {
+
             observationText.text =
                 String.format(
                     Locale.US,
@@ -2567,6 +4782,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun updatePositionMarker(
         location: Location
     ) {
+
         if (!::mapView.isInitialized) {
             return
         }
@@ -2578,9 +4794,12 @@ class MainActivity : ComponentActivity(), BleController.Events {
             )
 
         if (currentPositionMarker == null) {
+
             val marker =
                 Marker(mapView).apply {
-                    title = "DPS FIELD UNIT"
+
+                    title =
+                        "DPS FIELD UNIT"
 
                     icon =
                         ContextCompat.getDrawable(
@@ -2594,14 +4813,16 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     )
                 }
 
-            currentPositionMarker = marker
+            currentPositionMarker =
+                marker
 
             mapView.overlays.add(
                 marker
             )
         }
 
-        currentPositionMarker?.position = point
+        currentPositionMarker?.position =
+            point
 
         currentPositionMarker?.snippet =
             "Accuracy ±${location.accuracy.toInt()} m"
@@ -2614,6 +4835,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun centerOnLocation(
         location: Location
     ) {
+
         if (!::mapView.isInitialized) {
             return
         }
@@ -2631,6 +4853,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
         name: String,
         rssi: Int
     ) {
+
         val location =
             lastLocation
                 ?: return
@@ -2641,6 +4864,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         val marker =
             Marker(mapView).apply {
+
                 position =
                     GeoPoint(
                         location.latitude,
@@ -2666,7 +4890,10 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         observationMarkers.addLast(marker)
 
-        while (observationMarkers.size > 120) {
+        while (
+            observationMarkers.size > 120
+        ) {
+
             val old =
                 observationMarkers.removeFirst()
 
@@ -2679,12 +4906,16 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun markerIcon(
         type: String
     ): Drawable? {
+
         return if (type == "BLE") {
+
             ContextCompat.getDrawable(
                 this,
                 R.drawable.ic_ble_marker
             )
+
         } else {
+
             ContextCompat.getDrawable(
                 this,
                 R.drawable.ic_wifi_marker
@@ -2702,13 +4933,16 @@ class MainActivity : ComponentActivity(), BleController.Events {
     )
 
     private fun startCellScanning() {
+
         if (cellScanRunnable != null) {
             return
         }
 
         val runnable =
             object : Runnable {
+
                 override fun run() {
+
                     pollCellTowers()
 
                     cellScanHandler.postDelayed(
@@ -2718,12 +4952,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 }
             }
 
-        cellScanRunnable = runnable
+        cellScanRunnable =
+            runnable
 
         cellScanHandler.post(runnable)
     }
 
     private fun stopCellScanning() {
+
         cellScanRunnable?.let {
             cellScanHandler.removeCallbacks(it)
         }
@@ -2733,10 +4969,12 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
     @SuppressLint("MissingPermission")
     private fun pollCellTowers() {
+
         if (
             !hasPhoneStatePermission() ||
             !hasLocationPermission()
         ) {
+
             addLog(
                 "CELL: poll skipped — missing phone-state or location permission"
             )
@@ -2744,14 +4982,25 @@ class MainActivity : ComponentActivity(), BleController.Events {
             return
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (
+            Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.Q
+        ) {
+
             requestFreshCellInfo()
+
         } else {
-            val infos: List<CellInfo> =
+
+            val infos:
+                    List<CellInfo> =
                 try {
-                    telephonyManager.allCellInfo
+
+                    telephonyManager
+                        .allCellInfo
                         ?: emptyList()
+
                 } catch (_: SecurityException) {
+
                     emptyList()
                 }
 
@@ -2762,15 +5011,21 @@ class MainActivity : ComponentActivity(), BleController.Events {
     @RequiresApi(Build.VERSION_CODES.Q)
     @SuppressLint("MissingPermission")
     private fun requestFreshCellInfo() {
+
         try {
+
             telephonyManager.requestCellInfoUpdate(
-                ContextCompat.getMainExecutor(this),
+                ContextCompat.getMainExecutor(
+                    this
+                ),
                 object :
                     TelephonyManager.CellInfoCallback() {
 
                     override fun onCellInfo(
-                        cellInfo: MutableList<CellInfo>
+                        cellInfo:
+                        MutableList<CellInfo>
                     ) {
+
                         handleCellInfoList(
                             cellInfo
                         )
@@ -2780,6 +5035,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                         errorCode: Int,
                         detail: Throwable?
                     ) {
+
                         addLog(
                             "CELL: requestCellInfoUpdate error " +
                                     "$errorCode " +
@@ -2788,7 +5044,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     }
                 }
             )
+
         } catch (e: SecurityException) {
+
             addLog(
                 "CELL: requestCellInfoUpdate SecurityException: " +
                         "${e.message}"
@@ -2799,7 +5057,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun handleCellInfoList(
         infos: List<CellInfo>
     ) {
+
         if (infos.isEmpty()) {
+
             addLog(
                 "CELL: poll returned 0 towers " +
                         "(check system Location is ON, and that " +
@@ -2809,9 +5069,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
             return
         }
 
-        val now = Date()
+        val now =
+            Date()
 
         for (info in infos) {
+
             val obs =
                 extractCellObservation(info)
                     ?: continue
@@ -2838,39 +5100,64 @@ class MainActivity : ComponentActivity(), BleController.Events {
             renderRecentObservations()
 
             if (scanning) {
+
                 captureRecords.add(
                     CaptureRecord(
-                        type = obs.type,
-                        mac = obs.key,
-                        name = obs.name,
-                        authMode = obs.capabilities,
-                        channel = "",
-                        frequency = obs.frequency,
-                        rssi = obs.rssi.toString(),
+                        type =
+                            obs.type,
+
+                        mac =
+                            obs.key,
+
+                        name =
+                            obs.name,
+
+                        authMode =
+                            obs.capabilities,
+
+                        channel =
+                            "",
+
+                        frequency =
+                            obs.frequency,
+
+                        rssi =
+                            obs.rssi.toString(),
+
                         firstSeenUtc =
-                            exportDateFormat.format(now),
+                            exportDateFormat.format(
+                                now
+                            ),
+
                         latitude =
                             lastLocation
                                 ?.latitude
                                 ?.toString()
                                 ?: "",
+
                         longitude =
                             lastLocation
                                 ?.longitude
                                 ?.toString()
                                 ?: "",
+
                         altitude =
                             lastLocation
                                 ?.altitude
                                 ?.toString()
                                 ?: "",
+
                         accuracy =
                             lastLocation
                                 ?.accuracy
                                 ?.toString()
                                 ?: "",
-                        rcois = "",
-                        mfgrId = ""
+
+                        rcois =
+                            "",
+
+                        mfgrId =
+                            ""
                     )
                 )
             }
@@ -2886,6 +5173,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
         mcc: String?,
         mnc: String?
     ): String? {
+
         if (
             mcc.isNullOrBlank() ||
             mnc.isNullOrBlank()
@@ -2900,11 +5188,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun getMccMnc(
         info: CellInfo
     ): Pair<String?, String?> {
+
         return if (
             Build.VERSION.SDK_INT >=
             Build.VERSION_CODES.P
         ) {
+
             when (info) {
+
                 is CellInfoLte ->
                     info.cellIdentity.mccString to
                             info.cellIdentity.mncString
@@ -2920,9 +5211,13 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 else ->
                     null to null
             }
+
         } else {
+
             when (info) {
+
                 is CellInfoLte -> {
+
                     val mcc =
                         info.cellIdentity.mcc
                             .takeIf {
@@ -2941,6 +5236,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 }
 
                 is CellInfoGsm -> {
+
                     val mcc =
                         info.cellIdentity.mcc
                             .takeIf {
@@ -2959,6 +5255,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 }
 
                 is CellInfoWcdma -> {
+
                     val mcc =
                         info.cellIdentity.mcc
                             .takeIf {
@@ -2985,11 +5282,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun extractCellObservation(
         info: CellInfo
     ): CellObservation? {
+
         val (mcc, mnc) =
             getMccMnc(info)
 
         return when (info) {
+
             is CellInfoLte -> {
+
                 val id =
                     info.cellIdentity
 
@@ -2997,10 +5297,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     mccMncOperator(
                         mcc,
                         mnc
-                    ) ?: return null
+                    )
+                        ?: return null
 
-                val tac = id.tac
-                val ci = id.ci
+                val tac =
+                    id.tac
+
+                val ci =
+                    id.ci
 
                 if (
                     tac == Int.MAX_VALUE ||
@@ -3010,12 +5314,18 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 }
 
                 CellObservation(
-                    type = "LTE",
+                    type =
+                        "LTE",
+
                     key =
                         "${op}_${tac}_${ci}",
-                    name = op,
+
+                    name =
+                        op,
+
                     capabilities =
                         "LTE;$op",
+
                     frequency =
                         if (
                             id.earfcn !=
@@ -3025,12 +5335,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
                         } else {
                             ""
                         },
+
                     rssi =
                         info.cellSignalStrength.dbm
                 )
             }
 
             is CellInfoGsm -> {
+
                 val id =
                     info.cellIdentity
 
@@ -3038,10 +5350,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     mccMncOperator(
                         mcc,
                         mnc
-                    ) ?: return null
+                    )
+                        ?: return null
 
-                val lac = id.lac
-                val cid = id.cid
+                val lac =
+                    id.lac
+
+                val cid =
+                    id.cid
 
                 if (
                     lac == Int.MAX_VALUE ||
@@ -3051,12 +5367,18 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 }
 
                 CellObservation(
-                    type = "GSM",
+                    type =
+                        "GSM",
+
                     key =
                         "${op}_${lac}_${cid}",
-                    name = op,
+
+                    name =
+                        op,
+
                     capabilities =
                         "GSM;$op",
+
                     frequency =
                         if (
                             id.arfcn !=
@@ -3066,12 +5388,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
                         } else {
                             ""
                         },
+
                     rssi =
                         info.cellSignalStrength.dbm
                 )
             }
 
             is CellInfoWcdma -> {
+
                 val id =
                     info.cellIdentity
 
@@ -3079,10 +5403,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     mccMncOperator(
                         mcc,
                         mnc
-                    ) ?: return null
+                    )
+                        ?: return null
 
-                val lac = id.lac
-                val cid = id.cid
+                val lac =
+                    id.lac
+
+                val cid =
+                    id.cid
 
                 if (
                     lac == Int.MAX_VALUE ||
@@ -3092,12 +5420,18 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 }
 
                 CellObservation(
-                    type = "WCDMA",
+                    type =
+                        "WCDMA",
+
                     key =
                         "${op}_${lac}_${cid}",
-                    name = op,
+
+                    name =
+                        op,
+
                     capabilities =
                         "WCDMA;$op",
+
                     frequency =
                         if (
                             id.uarfcn !=
@@ -3107,31 +5441,42 @@ class MainActivity : ComponentActivity(), BleController.Events {
                         } else {
                             ""
                         },
+
                     rssi =
                         info.cellSignalStrength.dbm
                 )
             }
 
             is CellInfoCdma -> {
+
                 val id =
                     info.cellIdentity
 
                 CellObservation(
-                    type = "CDMA",
+                    type =
+                        "CDMA",
+
                     key =
                         "${id.systemId}_" +
                                 "${id.networkId}_" +
                                 "${id.basestationId}",
-                    name = "CDMA",
+
+                    name =
+                        "CDMA",
+
                     capabilities =
                         "CDMA;${id.systemId}",
-                    frequency = "",
+
+                    frequency =
+                        "",
+
                     rssi =
                         info.cellSignalStrength.dbm
                 )
             }
 
             else -> {
+
                 if (
                     Build.VERSION.SDK_INT >=
                     Build.VERSION_CODES.Q
@@ -3148,6 +5493,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun extractNrObservation(
         info: CellInfo
     ): CellObservation? {
+
         val nrInfo =
             info as?
                     android.telephony.CellInfoNr
@@ -3167,10 +5513,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
             mccMncOperator(
                 id.mccString,
                 id.mncString
-            ) ?: return null
+            )
+                ?: return null
 
-        val tac = id.tac
-        val nci = id.nci
+        val tac =
+            id.tac
+
+        val nci =
+            id.nci
 
         if (
             tac == Int.MAX_VALUE ||
@@ -3180,12 +5530,18 @@ class MainActivity : ComponentActivity(), BleController.Events {
         }
 
         return CellObservation(
-            type = "NR",
+            type =
+                "NR",
+
             key =
                 "${op}_${tac}_${nci}",
-            name = op,
+
+            name =
+                op,
+
             capabilities =
                 "NR;$op",
+
             frequency =
                 if (
                     id.nrarfcn !=
@@ -3195,11 +5551,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 } else {
                     ""
                 },
-            rssi = ss.dbm
+
+            rssi =
+                ss.dbm
         )
     }
 
     private fun requestPermissionsIfNeeded() {
+
         val permissions =
             mutableListOf<String>()
 
@@ -3207,6 +5566,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
             android.os.Build.VERSION.SDK_INT >=
             android.os.Build.VERSION_CODES.S
         ) {
+
             permissions +=
                 Manifest.permission.BLUETOOTH_SCAN
 
@@ -3232,44 +5592,58 @@ class MainActivity : ComponentActivity(), BleController.Events {
             }
 
         if (missing) {
+
             ActivityCompat.requestPermissions(
                 this,
                 permissions.toTypedArray(),
                 100
             )
+
         } else {
+
             ble.connectBondedOrScan()
+
             startLocationIfDashboardReady()
         }
     }
 
     private fun startLocationIfDashboardReady() {
+
         if (hasLocationPermission()) {
             startMap()
         }
     }
 
-    private fun hasLocationPermission(): Boolean =
+    private fun hasLocationPermission():
+            Boolean =
+
         ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED ||
+        ) ==
+                PackageManager.PERMISSION_GRANTED ||
+
                 ContextCompat.checkSelfPermission(
                     this,
                     Manifest.permission.ACCESS_COARSE_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED
+                ) ==
+                PackageManager.PERMISSION_GRANTED
 
-    private fun hasPhoneStatePermission(): Boolean =
+    private fun hasPhoneStatePermission():
+            Boolean =
+
         ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.READ_PHONE_STATE
-        ) == PackageManager.PERMISSION_GRANTED
+        ) ==
+                PackageManager.PERMISSION_GRANTED
 
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<String>,
         grantResults: IntArray
     ) {
+
         super.onRequestPermissionsResult(
             requestCode,
             permissions,
@@ -3277,12 +5651,15 @@ class MainActivity : ComponentActivity(), BleController.Events {
         )
 
         if (requestCode == 100) {
+
             ble.connectBondedOrScan()
+
             startLocationIfDashboardReady()
         }
     }
 
     override fun onResume() {
+
         super.onResume()
 
         if (::mapView.isInitialized) {
@@ -3295,6 +5672,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     override fun onPause() {
+
         if (::mapView.isInitialized) {
             mapView.onPause()
         }
@@ -3310,6 +5688,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     override fun onDestroy() {
+
         try {
             locationManager.removeUpdates(
                 locationListener
@@ -3325,7 +5704,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
         stopCellScanning()
 
         if (::fileLogger.isInitialized) {
-            fileLogger.write("=== APP STOP ===")
+
+            fileLogger.write(
+                "=== APP STOP ==="
+            )
+
             fileLogger.close()
         }
 
@@ -3338,7 +5721,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
         radius: Float = dp(4).toFloat(),
         strokeWidth: Int = dp(1)
     ): GradientDrawable {
+
         return GradientDrawable().apply {
+
             shape =
                 GradientDrawable.RECTANGLE
 
@@ -3358,7 +5743,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
         borderColor: Int,
         fillColor: Int
     ): GradientDrawable {
+
         return GradientDrawable().apply {
+
             shape =
                 GradientDrawable.OVAL
 
@@ -3375,7 +5762,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
         accent: Int,
         dashed: Boolean
     ): GradientDrawable {
+
         return GradientDrawable().apply {
+
             shape =
                 GradientDrawable.RECTANGLE
 
@@ -3392,13 +5781,16 @@ class MainActivity : ComponentActivity(), BleController.Events {
             )
 
             if (dashed) {
+
                 setStroke(
                     dp(1),
                     accent,
                     dp(6).toFloat(),
                     dp(4).toFloat()
                 )
+
             } else {
+
                 setStroke(
                     dp(1),
                     accent
@@ -3410,7 +5802,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun panel(
         borderColor: Int = cLine
     ): LinearLayout {
+
         return LinearLayout(this).apply {
+
             orientation =
                 LinearLayout.VERTICAL
 
@@ -3432,6 +5826,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     -1,
                     -2
                 ).apply {
+
                     setMargins(
                         0,
                         dp(4),
@@ -3446,7 +5841,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
         title: String,
         text: String
     ): View {
-        val p = panel()
+
+        val p =
+            panel()
 
         p.addView(
             tv(
@@ -3454,12 +5851,15 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 15,
                 cText0
             ).apply {
-                typeface = Typeface.create(
-                    "sans-serif-condensed",
-                    Typeface.BOLD
-                )
 
-                letterSpacing = 0.03f
+                typeface =
+                    Typeface.create(
+                        "sans-serif-condensed",
+                        Typeface.BOLD
+                    )
+
+                letterSpacing =
+                    0.03f
             }
         )
 
@@ -3469,6 +5869,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 12,
                 cText1
             ).apply {
+
                 typeface =
                     Typeface.MONOSPACE
             }
@@ -3481,18 +5882,24 @@ class MainActivity : ComponentActivity(), BleController.Events {
         text: String,
         accent: Int
     ): TextView {
+
         return tv(
             text,
             11,
             accent
         ).apply {
-            typeface = Typeface.create(
-                "sans-serif-condensed",
-                Typeface.BOLD
-            )
 
-            letterSpacing = 0.1f
-            includeFontPadding = false
+            typeface =
+                Typeface.create(
+                    "sans-serif-condensed",
+                    Typeface.BOLD
+                )
+
+            letterSpacing =
+                0.1f
+
+            includeFontPadding =
+                false
 
             setPadding(
                 dp(4),
@@ -3506,6 +5913,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun EditText.persist(
         key: String
     ) {
+
         setText(
             prefs.getString(
                 key,
@@ -3514,7 +5922,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
         )
 
         addTextChangedListener(
-            object : TextWatcher {
+            object :
+                TextWatcher {
+
                 override fun beforeTextChanged(
                     s: CharSequence?,
                     start: Int,
@@ -3534,6 +5944,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 override fun afterTextChanged(
                     s: android.text.Editable?
                 ) {
+
                     prefs.edit()
                         .putString(
                             key,
@@ -3553,11 +5964,13 @@ class MainActivity : ComponentActivity(), BleController.Events {
             text: CharSequence?,
             type: BufferType?
         ) {
+
             val lines =
                 (text?.toString() ?: "")
                     .split("\n")
 
             if (lines.size < 2) {
+
                 super.setText(
                     text,
                     type
@@ -3598,7 +6011,10 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     data.size
                 }
 
-            data.forEachIndexed { i, line ->
+            data.forEachIndexed {
+                    i,
+                    line ->
+
                 sb.append('\n')
 
                 val start =
@@ -3607,8 +6023,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 sb.append(line)
 
                 if (i < valueLineCount) {
+
                     sb.setSpan(
-                        RelativeSizeSpan(1.24f),
+                        RelativeSizeSpan(
+                            1.24f
+                        ),
                         start,
                         sb.length,
                         flag
@@ -3622,16 +6041,22 @@ class MainActivity : ComponentActivity(), BleController.Events {
                         sb.length,
                         flag
                     )
+
                 } else {
+
                     sb.setSpan(
-                        RelativeSizeSpan(0.8f),
+                        RelativeSizeSpan(
+                            0.8f
+                        ),
                         start,
                         sb.length,
                         flag
                     )
 
                     sb.setSpan(
-                        ForegroundColorSpan(cText1),
+                        ForegroundColorSpan(
+                            cText1
+                        ),
                         start,
                         sb.length,
                         flag
@@ -3651,8 +6076,10 @@ class MainActivity : ComponentActivity(), BleController.Events {
         value: String,
         accent: Int
     ): TextView {
+
         val tick =
             GradientDrawable().apply {
+
                 cornerRadius =
                     dp(2).toFloat()
 
@@ -3665,7 +6092,9 @@ class MainActivity : ComponentActivity(), BleController.Events {
             }
 
         return StatView(this).apply {
-            textSize = 12f
+
+            textSize =
+                12f
 
             setPadding(
                 dp(14),
@@ -3685,7 +6114,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
             gravity =
                 Gravity.CENTER_VERTICAL
 
-            includeFontPadding = false
+            includeFontPadding =
+                false
 
             typeface =
                 Typeface.create(
@@ -3693,7 +6123,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     Typeface.NORMAL
                 )
 
-            letterSpacing = 0.01f
+            letterSpacing =
+                0.01f
 
             setLineSpacing(
                 dp(4).toFloat(),
@@ -3719,11 +6150,13 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
     private fun gridCellParams():
             LinearLayout.LayoutParams =
+
         LinearLayout.LayoutParams(
             0,
             -1,
             1f
         ).apply {
+
             setMargins(
                 dp(3),
                 dp(3),
@@ -3737,8 +6170,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
         size: Int,
         textColor: Int
     ): TextView {
+
         return TextView(this).apply {
-            this.text = text
+
+            this.text =
+                text
 
             textSize =
                 size.toFloat()
@@ -3762,12 +6198,18 @@ class MainActivity : ComponentActivity(), BleController.Events {
         dashed: Boolean = false,
         action: (() -> Unit)? = null
     ): Button {
+
         return Button(this).apply {
-            this.text = text
 
-            textSize = 12.5f
+            this.text =
+                text
 
-            setTextColor(accent)
+            textSize =
+                12.5f
+
+            setTextColor(
+                accent
+            )
 
             typeface =
                 Typeface.create(
@@ -3775,7 +6217,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     Typeface.BOLD
                 )
 
-            letterSpacing = 0.03f
+            letterSpacing =
+                0.03f
 
             background =
                 pillButtonBg(
@@ -3790,7 +6233,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 dp(4)
             )
 
-            stateListAnimator = null
+            stateListAnimator =
+                null
 
             action?.let {
                 setOnClickListener {
@@ -3803,14 +6247,21 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun edit(
         hint: String
     ): EditText {
+
         return EditText(this).apply {
-            this.hint = hint
+
+            this.hint =
+                hint
 
             setSingleLine(true)
 
-            setTextColor(cText0)
+            setTextColor(
+                cText0
+            )
 
-            setHintTextColor(cText2)
+            setHintTextColor(
+                cText2
+            )
 
             typeface =
                 Typeface.MONOSPACE
@@ -3835,6 +6286,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     -1,
                     dp(52)
                 ).apply {
+
                     setMargins(
                         0,
                         dp(4),
@@ -3847,11 +6299,13 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
     private fun weightParams():
             LinearLayout.LayoutParams =
+
         LinearLayout.LayoutParams(
             0,
             -2,
             1f
         ).apply {
+
             setMargins(
                 dp(3),
                 dp(3),
@@ -3863,12 +6317,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private fun addLog(
         message: String
     ) {
+
         val timestamp =
             dateFormat.format(
                 Date()
             )
 
-        val line = "[$timestamp] $message"
+        val line =
+            "[$timestamp] $message"
 
         logs.addLast(line)
 
@@ -3882,6 +6338,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun copyLogs() {
+
         val clipboard =
             getSystemService(
                 Context.CLIPBOARD_SERVICE
@@ -3898,7 +6355,219 @@ class MainActivity : ComponentActivity(), BleController.Events {
             "COMMUNICATION COPIED"
         )
     }
+    //--------
+    override fun onCreate(
+        savedInstanceState: Bundle?
+    ) {
+        super.onCreate(savedInstanceState)
 
+        WindowCompat.setDecorFitsSystemWindows(
+            window,
+            false
+        )
+
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        )
+
+        window.statusBarColor =
+            Color.rgb(5, 7, 10)
+
+        window.navigationBarColor =
+            Color.rgb(5, 7, 10)
+
+        Configuration.getInstance()
+            .userAgentValue =
+            packageName
+
+        locationManager =
+            getSystemService(
+                Context.LOCATION_SERVICE
+            ) as LocationManager
+
+        telephonyManager =
+            getSystemService(
+                Context.TELEPHONY_SERVICE
+            ) as TelephonyManager
+
+        prefs =
+            getSharedPreferences(
+                "dps_prefs",
+                Context.MODE_PRIVATE
+            )
+
+        fileLogger =
+            FileLogger(this)
+
+        fileLogger.write(
+            "=== APP START (DPS Field Controller) ==="
+        )
+
+        buildDashboard()
+
+        ble =
+            BleController(
+                this,
+                this
+            )
+
+        requestPermissionsIfNeeded()
+
+
+    }
+
+    private fun buildDashboard() {
+        root =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
+
+                setBackgroundColor(cBg)
+
+                setPadding(
+                    dp(10),
+                    dp(8),
+                    dp(10),
+                    dp(8)
+                )
+            }
+
+        ViewCompat.setOnApplyWindowInsetsListener(
+            root
+        ) { view, insets ->
+
+            val bars =
+                insets.getInsets(
+                    WindowInsetsCompat.Type.systemBars()
+                )
+
+            view.setPadding(
+                dp(10) + bars.left,
+                dp(8) + bars.top,
+                dp(10) + bars.right,
+                dp(8) + bars.bottom
+            )
+
+            insets
+        }
+
+        ViewCompat.requestApplyInsets(root)
+
+        windowRoot =
+            FrameLayout(this)
+
+        windowRoot.setBackgroundColor(cBg)
+
+        windowRoot.addView(
+            root,
+            FrameLayout.LayoutParams(
+                -1,
+                -1
+            )
+        )
+
+        setContentView(windowRoot)
+
+        mapView =
+            MapView(this).apply {
+                setTileSource(
+                    TileSourceFactory.MAPNIK
+                )
+
+                setMultiTouchControls(true)
+
+                controller.setZoom(16.0)
+
+                setBackgroundColor(
+                    Color.rgb(6, 12, 16)
+                )
+            }
+
+        root.addView(header())
+        root.addView(statusStrip())
+
+        content =
+            FrameLayout(this)
+
+        root.addView(
+            content,
+            LinearLayout.LayoutParams(
+                -1,
+                0,
+                1f
+            )
+        )
+
+        showDashboardPage()
+        buildStealthOverlay()
+    }
+
+    private fun buildStealthOverlay() {
+        stealthOverlay =
+            FrameLayout(this).apply {
+                setBackgroundColor(Color.BLACK)
+
+                isClickable = true
+                isFocusable = true
+
+                setOnClickListener {
+                    exitStealthMode()
+                }
+
+                visibility =
+                    View.GONE
+            }
+
+        val counters =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
+
+                gravity =
+                    Gravity.CENTER
+            }
+
+        val mutedWhite =
+            color("#B8C0C2")
+
+        stealthWifiText =
+            stealthCounterText(mutedWhite)
+
+        stealthBleText =
+            stealthCounterText(mutedWhite)
+
+        stealthCellText =
+            stealthCounterText(mutedWhite)
+
+        counters.addView(
+            stealthWifiText
+        )
+
+        counters.addView(
+            stealthBleText
+        )
+
+        counters.addView(
+            stealthCellText
+        )
+
+        stealthOverlay.addView(
+            counters,
+            FrameLayout.LayoutParams(
+                -1,
+                -1
+            )
+        )
+
+        windowRoot.addView(
+            stealthOverlay,
+            FrameLayout.LayoutParams(
+                -1,
+                -1
+            )
+        )
+    }
+    //--------------------
     private fun color(
         hex: String
     ): Int =
@@ -3911,4 +6580,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 value *
                         resources.displayMetrics.density
                 ).toInt()
+
+
 }
