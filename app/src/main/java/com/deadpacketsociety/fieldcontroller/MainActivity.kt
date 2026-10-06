@@ -1,5 +1,3 @@
-
-
 package com.deadpacketsociety.fieldcontroller
 
 import android.Manifest
@@ -102,19 +100,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private val seenCellKeys = LinkedHashSet<String>()
     private val excludedMacs = LinkedHashSet<String>()
 
-    /*
- * DPS controller reports explicit node slots.
- *
- * The slot is authoritative for UI position:
- *
- *   slot 1  -> first card
- *   slot 2  -> second card
- *   ...
- *   slot 10 -> tenth card
- *
- * The controller-reported node ID is kept separately because the
- * controller sends IDs such as "DPS-04" as strings.
- */
     private data class NodeState(
         val slot: Int,
         var nodeId: String,
@@ -142,12 +127,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
     private val nodeMissStreak = HashMap<Int, Int>()
 
-    /*
- * Controller sends a status snapshot every 3 seconds.
- *
- * The app still receives and processes every status packet, but the
- * displayed node state is reconciled only after every 10 status packets.
- */
     private var nodeStatusUpdateCount = 0
 
     private var showingNodesPage = false
@@ -323,18 +302,223 @@ class MainActivity : ComponentActivity(), BleController.Events {
         arrayOfNulls<NodeCardViews>(
             NODE_SLOT_COUNT
         )
-    private fun signInToWardrift() {
-        val username =
-            wardriftUsername.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
 
-        val password =
-            wardriftPassword.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
+    override fun onCreate(
+        savedInstanceState: Bundle?
+    ) {
+        super.onCreate(savedInstanceState)
+
+        WindowCompat.setDecorFitsSystemWindows(
+            window,
+            false
+        )
+
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        )
+
+        window.statusBarColor =
+            Color.rgb(5, 7, 10)
+
+        window.navigationBarColor =
+            Color.rgb(5, 7, 10)
+
+        Configuration.getInstance()
+            .userAgentValue =
+            packageName
+
+        locationManager =
+            getSystemService(
+                Context.LOCATION_SERVICE
+            ) as LocationManager
+
+        telephonyManager =
+            getSystemService(
+                Context.TELEPHONY_SERVICE
+            ) as TelephonyManager
+
+        prefs =
+            getSharedPreferences(
+                "dps_prefs",
+                Context.MODE_PRIVATE
+            )
+
+        fileLogger =
+            FileLogger(this)
+
+        fileLogger.write(
+            "=== APP START (DPS Field Controller) ==="
+        )
+
+        buildDashboard()
+
+        ble =
+            BleController(
+                this,
+                this
+            )
+
+        requestPermissionsIfNeeded()
+    }
+
+    private fun buildDashboard() {
+        root =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
+
+                setBackgroundColor(cBg)
+
+                setPadding(
+                    dp(10),
+                    dp(8),
+                    dp(10),
+                    dp(8)
+                )
+            }
+
+        ViewCompat.setOnApplyWindowInsetsListener(
+            root
+        ) { view, insets ->
+
+            val bars =
+                insets.getInsets(
+                    WindowInsetsCompat.Type.systemBars()
+                )
+
+            view.setPadding(
+                dp(10) + bars.left,
+                dp(8) + bars.top,
+                dp(10) + bars.right,
+                dp(8) + bars.bottom
+            )
+
+            insets
+        }
+
+        ViewCompat.requestApplyInsets(root)
+
+        windowRoot =
+            FrameLayout(this)
+
+        windowRoot.setBackgroundColor(cBg)
+
+        windowRoot.addView(
+            root,
+            FrameLayout.LayoutParams(
+                -1,
+                -1
+            )
+        )
+
+        setContentView(windowRoot)
+
+        mapView =
+            MapView(this).apply {
+                setTileSource(
+                    TileSourceFactory.MAPNIK
+                )
+
+                setMultiTouchControls(true)
+
+                controller.setZoom(16.0)
+
+                setBackgroundColor(
+                    Color.rgb(6, 12, 16)
+                )
+            }
+
+        root.addView(header())
+        root.addView(statusStrip())
+
+        content =
+            FrameLayout(this)
+
+        root.addView(
+            content,
+            LinearLayout.LayoutParams(
+                -1,
+                0,
+                1f
+            )
+        )
+
+        showDashboardPage()
+        buildStealthOverlay()
+    }
+
+    private fun buildStealthOverlay() {
+        stealthOverlay =
+            FrameLayout(this).apply {
+                setBackgroundColor(Color.BLACK)
+
+                isClickable = true
+                isFocusable = true
+
+                setOnClickListener {
+                    exitStealthMode()
+                }
+
+                visibility =
+                    View.GONE
+            }
+
+        val counters =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.VERTICAL
+
+                gravity =
+                    Gravity.CENTER
+            }
+
+        val mutedWhite =
+            color("#B8C0C2")
+
+        stealthWifiText =
+            stealthCounterText(mutedWhite)
+
+        stealthBleText =
+            stealthCounterText(mutedWhite)
+
+        stealthCellText =
+            stealthCounterText(mutedWhite)
+
+        counters.addView(
+            stealthWifiText
+        )
+
+        counters.addView(
+            stealthBleText
+        )
+
+        counters.addView(
+            stealthCellText
+        )
+
+        stealthOverlay.addView(
+            counters,
+            FrameLayout.LayoutParams(
+                -1,
+                -1
+            )
+        )
+
+        windowRoot.addView(
+            stealthOverlay,
+            FrameLayout.LayoutParams(
+                -1,
+                -1
+            )
+        )
+    }
+
+    private fun pref(key: String): String =
+        prefs.getString(key, "")?.trim().orEmpty()
+
+    private fun signInToWardrift() {
+        val username = pref("wardrift_username")
+        val password = pref("wardrift_password")
 
         if (username.isEmpty() || password.isEmpty()) {
             Toast.makeText(
@@ -702,9 +886,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     LinearLayout.HORIZONTAL
             }
 
-        /*
-     * There are always 10 physical/controller slots.
-     */
         nodeText =
             stat(
                 "NODES ONLINE",
@@ -840,9 +1021,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
             weightParams()
         )
 
-        /*
-   * Dedicated dashboard NODES button.
-   */
         secondControls.addView(
             button(
                 "NODES",
@@ -912,10 +1090,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 cPurple,
                 dashed = false
             ) {
-                //l0l
-                uploadToWigle()
-                uploadToWdgWars()
-                uploadToWardrift()
+                uploadAll()
             },
             LinearLayout.LayoutParams(
                 0,
@@ -1660,15 +1835,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
         wardriftCard.addView(wardriftUsername)
         wardriftCard.addView(wardriftPassword)
 
-        /*wardriftCard.addView(
-            button(
-                "SIGN IN TO WARDRIFT",
-                cBlue
-            ) {
-                signInToWardrift()
-            }
-        )
-        */
         wardriftCard.addView(
             button(
                 "UPLOAD TO WARDRIFT",
@@ -1728,16 +1894,10 @@ class MainActivity : ComponentActivity(), BleController.Events {
             captureText.setTextColor(
                 cText1
             )
-            if (scanning) {
-                saveWigleCsvToDownloads()///save here
-            }
+
             stopCellScanning()
 
 
-            /*
-         * Start the next controller connection with a fresh
-         * ten-status reconciliation cycle.
-         */
             nodeStatusUpdateCount = 0
 
             addLog(
@@ -1828,13 +1988,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
         }
     }
 
-    /*
- * Process every status packet, but only publish the node state to the
- * visible UI every tenth status packet.
- *
- * The controller's "slot" field is authoritative. JSON array order is
- * deliberately ignored.
- */
     private fun processStatus(
         json: JSONObject
     ) {
@@ -1857,12 +2010,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         if (arr != null) {
 
-            /*
-             * Build the latest snapshot from scratch.
-             *
-             * All ten slots remain represented. Slots not present in a
-             * snapshot remain offline rather than shifting other nodes.
-             */
             val seenSlots =
                 BooleanArray(
                     NODE_SLOT_COUNT
@@ -1886,14 +2033,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     continue
                 }
 
-                /*
-                 * Record that this node has supplied a fresh status
-                 * during the current 10-node status cycle.
-                 *
-                 * nodeStatusUpdateCount is used as a bitmask here,
-                 * so duplicate reports from the same slot do not count
-                 * more than once.
-                 */
                 nodeStatusUpdateCount =
                     nodeStatusUpdateCount or
                             (1 shl (slot - 1))
@@ -1944,9 +2083,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     }
                 } else if (previousDisplayed) {
 
-                    /*
-                     * Preserve the existing 20-status offline debounce.
-                     */
                     val misses =
                         (
                                 nodeMissStreak[slot]
@@ -1979,10 +2115,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     nodeMissStreak[slot] = 0
                 }
 
-                /*
-                 * Determine the state that should become visible when
-                 * all ten node slots have supplied a fresh status.
-                 */
                 val displayedOnline =
                     if (rawOnline) {
                         true
@@ -2055,10 +2187,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 )
             }
 
-            /*
-             * Any slot omitted from a complete controller snapshot is
-             * treated as offline, but its fixed position is preserved.
-             */
             for (
             index in 0 until NODE_SLOT_COUNT
             ) {
@@ -2111,10 +2239,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
             }
         }
 
-        /*
-         * Wait until all ten unique node slots have supplied a fresh
-         * status before updating the displayed node state and dashboard.
-         */
         val allNodeStatusesReceived =
             (1 shl NODE_SLOT_COUNT) - 1
 
@@ -2124,9 +2248,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
         ) {
             reconcileDisplayedNodes()
 
-            /*
-             * Start a completely new 10-node status cycle.
-             */
             nodeStatusUpdateCount = 0
         }
     }
@@ -2173,10 +2294,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 "NODES ONLINE\n$onlineNodes / $totalNodes"
         }
 
-        /*
-     * If the NODES page is currently open, rebuild it only now — on the
-     * ten-status boundary — rather than on every controller packet.
-     */
         if (showingNodesPage) {
             updateNodesPage()
         }
@@ -2186,7 +2303,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
         json: JSONObject,
         type: String
     ) {
-        if(scanning ){
+        if (scanning) {
             val now = Date()
 
             if (type == "WIFI") {
@@ -2707,12 +2824,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
             }
         )
 
-        /*
-         * Build the ten physical node cards ONCE.
-         *
-         * After this page is created, status updates modify the existing
-         * TextViews instead of destroying and rebuilding the cards.
-         */
         for (
         index in 0 until NODE_SLOT_COUNT
         ) {
@@ -2732,9 +2843,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         content.addView(scroll)
 
-        /*
-         * Restore the current scroll position after the initial page build.
-         */
         scroll.post {
             val maxScroll =
                 (
@@ -2802,9 +2910,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     cRed
                 }
 
-            /*
-             * Update only the existing views.
-             */
             views.statusDot.setTextColor(
                 statusColor
             )
@@ -2873,9 +2978,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
                 }
         }
 
-        /*
-         * Update the header count without rebuilding the page.
-         */
         val onlineHeader =
             content.findViewWithTag<TextView>(
                 "NODE_ONLINE_COUNT"
@@ -3406,35 +3508,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun uploadAll() {
-        val wigleNameValue =
-            wigleName.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
-
-        val wigleTokenValue =
-            wigleToken.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
-
-        val wdgWarsKeyValue =
-            wdgWarsKey.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
-
-        val wardriftUsernameValue =
-            wardriftUsername.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
-
-        val wardriftPasswordValue =
-            wardriftPassword.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
+        val wigleNameValue = pref("wigle_name")
+        val wigleTokenValue = pref("wigle_token")
+        val wdgWarsKeyValue = pref("wdgwars_key")
+        val wardriftUsernameValue = pref("wardrift_username")
+        val wardriftPasswordValue = pref("wardrift_password")
 
         val wigleReady =
             wigleNameValue.isNotEmpty() &&
@@ -3475,8 +3553,6 @@ class MainActivity : ComponentActivity(), BleController.Events {
             return
         }
 
-        // Generate and save the CSV exactly once. The same filename and
-        // byte array are then reused for every service whose credentials exist.
         val saved =
             saveWigleCsvToDownloads()
                 ?: return
@@ -3609,17 +3685,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun uploadToWigle() {
-        val name =
-            wigleName.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
-
-        val token =
-            wigleToken.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
+        val name = pref("wigle_name")
+        val token = pref("wigle_token")
 
         if (
             name.isEmpty() ||
@@ -3741,11 +3808,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun uploadToWdgWars() {
-        val key =
-            wdgWarsKey.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
+        val key = pref("wdgwars_key")
 
         if (key.isEmpty()) {
             Toast.makeText(
@@ -4080,17 +4143,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
     }
 
     private fun uploadToWardrift() {
-        val username =
-            wardriftUsername.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
-
-        val password =
-            wardriftPassword.text
-                ?.toString()
-                ?.trim()
-                .orEmpty()
+        val username = pref("wardrift_username")
+        val password = pref("wardrift_password")
 
         if (username.isEmpty() || password.isEmpty()) {
             Toast.makeText(
@@ -6355,219 +6409,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
             "COMMUNICATION COPIED"
         )
     }
-    //--------
-    override fun onCreate(
-        savedInstanceState: Bundle?
-    ) {
-        super.onCreate(savedInstanceState)
 
-        WindowCompat.setDecorFitsSystemWindows(
-            window,
-            false
-        )
-
-        window.addFlags(
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-        )
-
-        window.statusBarColor =
-            Color.rgb(5, 7, 10)
-
-        window.navigationBarColor =
-            Color.rgb(5, 7, 10)
-
-        Configuration.getInstance()
-            .userAgentValue =
-            packageName
-
-        locationManager =
-            getSystemService(
-                Context.LOCATION_SERVICE
-            ) as LocationManager
-
-        telephonyManager =
-            getSystemService(
-                Context.TELEPHONY_SERVICE
-            ) as TelephonyManager
-
-        prefs =
-            getSharedPreferences(
-                "dps_prefs",
-                Context.MODE_PRIVATE
-            )
-
-        fileLogger =
-            FileLogger(this)
-
-        fileLogger.write(
-            "=== APP START (DPS Field Controller) ==="
-        )
-
-        buildDashboard()
-
-        ble =
-            BleController(
-                this,
-                this
-            )
-
-        requestPermissionsIfNeeded()
-
-
-    }
-
-    private fun buildDashboard() {
-        root =
-            LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.VERTICAL
-
-                setBackgroundColor(cBg)
-
-                setPadding(
-                    dp(10),
-                    dp(8),
-                    dp(10),
-                    dp(8)
-                )
-            }
-
-        ViewCompat.setOnApplyWindowInsetsListener(
-            root
-        ) { view, insets ->
-
-            val bars =
-                insets.getInsets(
-                    WindowInsetsCompat.Type.systemBars()
-                )
-
-            view.setPadding(
-                dp(10) + bars.left,
-                dp(8) + bars.top,
-                dp(10) + bars.right,
-                dp(8) + bars.bottom
-            )
-
-            insets
-        }
-
-        ViewCompat.requestApplyInsets(root)
-
-        windowRoot =
-            FrameLayout(this)
-
-        windowRoot.setBackgroundColor(cBg)
-
-        windowRoot.addView(
-            root,
-            FrameLayout.LayoutParams(
-                -1,
-                -1
-            )
-        )
-
-        setContentView(windowRoot)
-
-        mapView =
-            MapView(this).apply {
-                setTileSource(
-                    TileSourceFactory.MAPNIK
-                )
-
-                setMultiTouchControls(true)
-
-                controller.setZoom(16.0)
-
-                setBackgroundColor(
-                    Color.rgb(6, 12, 16)
-                )
-            }
-
-        root.addView(header())
-        root.addView(statusStrip())
-
-        content =
-            FrameLayout(this)
-
-        root.addView(
-            content,
-            LinearLayout.LayoutParams(
-                -1,
-                0,
-                1f
-            )
-        )
-
-        showDashboardPage()
-        buildStealthOverlay()
-    }
-
-    private fun buildStealthOverlay() {
-        stealthOverlay =
-            FrameLayout(this).apply {
-                setBackgroundColor(Color.BLACK)
-
-                isClickable = true
-                isFocusable = true
-
-                setOnClickListener {
-                    exitStealthMode()
-                }
-
-                visibility =
-                    View.GONE
-            }
-
-        val counters =
-            LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.VERTICAL
-
-                gravity =
-                    Gravity.CENTER
-            }
-
-        val mutedWhite =
-            color("#B8C0C2")
-
-        stealthWifiText =
-            stealthCounterText(mutedWhite)
-
-        stealthBleText =
-            stealthCounterText(mutedWhite)
-
-        stealthCellText =
-            stealthCounterText(mutedWhite)
-
-        counters.addView(
-            stealthWifiText
-        )
-
-        counters.addView(
-            stealthBleText
-        )
-
-        counters.addView(
-            stealthCellText
-        )
-
-        stealthOverlay.addView(
-            counters,
-            FrameLayout.LayoutParams(
-                -1,
-                -1
-            )
-        )
-
-        windowRoot.addView(
-            stealthOverlay,
-            FrameLayout.LayoutParams(
-                -1,
-                -1
-            )
-        )
-    }
-    //--------------------
     private fun color(
         hex: String
     ): Int =
