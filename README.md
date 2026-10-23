@@ -297,6 +297,14 @@ This allows additional field nodes and specialized hardware to be added without 
 
 ---
 
+## Watch companion
+
+While this app is open it serves a loopback feed at `127.0.0.1:4774` for the DPS Field Pebble app: scan totals, node status, and the communication monitor.
+
+https://github.com/Darachnid/dps-field
+
+---
+
 ## Project Status
 
 DPS Field Controller is an active development project.

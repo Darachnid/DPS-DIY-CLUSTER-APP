@@ -200,6 +200,18 @@ class MainActivity : ComponentActivity(), BleController.Events {
     private val cellScanIntervalMs = 4000L
 
     private lateinit var fileLogger: FileLogger
+    private val snapshot = FieldSnapshot()
+    private val feed = LocalFeed(snapshot)
+    private var bleUp = false
+    private var roleProbeIndex = 0
+    private val roleProbeAt = LongArray(NODE_SLOT_COUNT)
+    private val roleProbeHandler = Handler(Looper.getMainLooper())
+    private val roleProbeRunnable = object : Runnable {
+        override fun run() {
+            probeNodeRole()
+            roleProbeHandler.postDelayed(this, 5000L)
+        }
+    }
 
     private val locationListener =
         object : LocationListener {
@@ -359,6 +371,22 @@ class MainActivity : ComponentActivity(), BleController.Events {
             )
 
         requestPermissionsIfNeeded()
+
+        try {
+            feed.start()
+            addLog(
+                "WATCH FEED 127.0.0.1:${LocalFeed.PORT}"
+            )
+        } catch (e: Exception) {
+            addLog(
+                "WATCH FEED FAILED ${e.message ?: "unknown error"}"
+            )
+        }
+
+        roleProbeHandler.postDelayed(
+            roleProbeRunnable,
+            8000L
+        )
     }
 
     private fun buildDashboard() {
@@ -1265,6 +1293,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
         clearTravelPath()
 
         scanning = true
+        snapshot.beginSession()
 
         captureButton.text =
             "■  STOP"
@@ -1301,6 +1330,7 @@ class MainActivity : ComponentActivity(), BleController.Events {
         }
 
         scanning = false
+        snapshot.setScanning(false)
 
         captureButton.text =
             "▶  START"
@@ -1865,6 +1895,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
             addLog(
                 "BLE: CONNECTED TO $name"
             )
+
+            bleUp = true
         }
     }
 
@@ -1878,6 +1910,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
             )
 
             scanning = false
+            snapshot.setScanning(false)
+            bleUp = false
 
             if (::captureButton.isInitialized) {
                 captureButton.text =
@@ -2004,6 +2038,14 @@ class MainActivity : ComponentActivity(), BleController.Events {
             "mac",
             "ble"
         )
+
+        if (
+            json.optJSONArray("nodes") == null &&
+            json.has("node")
+        ) {
+            snapshot.noteNodeReport(json)
+            return
+        }
 
         val arr =
             json.optJSONArray("nodes")
@@ -2297,6 +2339,115 @@ class MainActivity : ComponentActivity(), BleController.Events {
         if (showingNodesPage) {
             updateNodesPage()
         }
+
+        for (state in displayedNodeStates) {
+            snapshot.syncNode(
+                state.slot,
+                state.nodeId,
+                state.online
+            )
+        }
+    }
+
+    private fun noteAcceptedObservation(
+        json: JSONObject,
+        type: String
+    ) {
+        val node =
+            json.optInt(
+                "node",
+                0
+            )
+
+        if (type == "WIFI") {
+            snapshot.noteWifi(
+                node = node,
+                bssid = normalizeMac(
+                    json.optString(
+                        "bssid",
+                        ""
+                    )
+                ),
+                frequency = json.optInt(
+                    "frequency",
+                    0
+                ),
+                channel = json.optInt(
+                    "ch",
+                    json.optInt(
+                        "channel",
+                        0
+                    )
+                ),
+                name = json.optString(
+                    "ssid",
+                    ""
+                )
+            )
+        } else if (type == "BLE") {
+            val mac =
+                normalizeMac(
+                    json.optString(
+                        "mac",
+                        ""
+                    )
+                )
+
+            snapshot.noteBle(
+                node = node,
+                mac = mac,
+                name = json.optString(
+                    "name",
+                    json.optString(
+                        "ssid",
+                        mac
+                    )
+                )
+            )
+        }
+    }
+
+    private fun probeNodeRole() {
+        if (
+            !bleUp ||
+            !::ble.isInitialized
+        ) {
+            return
+        }
+
+        val now =
+            System.currentTimeMillis()
+
+        for (step in 0 until NODE_SLOT_COUNT) {
+            val index =
+                (roleProbeIndex + step) %
+                        NODE_SLOT_COUNT
+
+            val state =
+                displayedNodeStates[index]
+
+            if (!state.online) {
+                continue
+            }
+
+            if (
+                now - roleProbeAt[index] <
+                60_000L
+            ) {
+                continue
+            }
+
+            roleProbeAt[index] = now
+            roleProbeIndex =
+                (index + 1) %
+                        NODE_SLOT_COUNT
+
+            ble.send(
+                "NODE ${state.nodeId} {\"cmd\":\"status\"}"
+            )
+
+            return
+        }
     }
 
     private fun processObservation(
@@ -2362,6 +2513,11 @@ class MainActivity : ComponentActivity(), BleController.Events {
                     return
                 }
             }
+
+            noteAcceptedObservation(
+                json,
+                type
+            )
 
             observations++
 
@@ -5757,6 +5913,12 @@ class MainActivity : ComponentActivity(), BleController.Events {
 
         stopCellScanning()
 
+        roleProbeHandler.removeCallbacks(
+            roleProbeRunnable
+        )
+
+        feed.stop()
+
         if (::fileLogger.isInitialized) {
 
             fileLogger.write(
@@ -6385,6 +6547,8 @@ class MainActivity : ComponentActivity(), BleController.Events {
         while (logs.size > 200) {
             logs.removeFirst()
         }
+
+        snapshot.noteLog(line)
 
         if (::fileLogger.isInitialized) {
             fileLogger.write(message)
